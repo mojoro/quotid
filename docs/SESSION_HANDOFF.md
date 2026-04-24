@@ -1,18 +1,26 @@
 # Quotid — Session Handoff
 
-**Written:** 2026-04-24 (end of design session 1)
-**For:** a fresh Claude Code session resuming this work on 2026-04-25
+**Written:** 2026-04-24 (end of design session 2)
+**For:** a fresh Claude Code session resuming this work, possibly on a different machine.
+
+---
+
+## First thing fresh Claude should say
+
+> Read `docs/SESSION_HANDOFF.md` end-to-end. Steps 1–5 of the design phase are complete and audit-passed. Step 6 (Modal transcription interface) is the last remaining design step. The blocking open question is **"what does 'via WhatsApp' mean for the demo?"** (see §Open questions below) — answer that, confirm the Oracle region choice, and I'll write Step 6.
+
+If the user says "just proceed," assume interpretation **C** for WhatsApp (meeting medium, not product integration) and assume **US East (Ashburn)** as the Oracle home region.
 
 ---
 
 ## Who / What / When
 
-- **User:** John Moorman. Week 9 of a 10-projects-in-10-weeks challenge.
-- **Project:** Quotid — a voice-agent journaling app. A Temporal schedule fires at the user's local 9 pm, an outbound call rings the user, a Pipecat-driven voice agent has a Storyworthy-style conversation, and the transcript is summarized into a journal entry.
-- **Deadline:** ~3 days from today (target ship: ~2026-04-27). This is a **portfolio + interview prep** artifact, not a production service.
+- **User:** John Moorman. Week 9 of a 10-projects-in-10-weeks challenge. User currently physically in Frankfurt; from the US.
+- **Project:** Quotid — voice-agent journaling app. Temporal schedule fires at the user's local 9 pm, outbound call rings the user, Pipecat-driven voice agent has a Storyworthy-style conversation, transcript is summarized into a journal entry.
+- **Deadline:** ship target ~2026-04-27 (~3 days from design start). **Portfolio + interview prep artifact**, not a production service.
 - **Interview target:** telli (YC AI voice-agent startup, `telli.com`). Telli's public stack is TypeScript/React/TanStack, Node + Python, Postgres, **Temporal, Twilio, Modal, Pipecat**, Cartesia. Quotid's stack mirrors this intentionally.
 
-## Target stack (final, post-decisions)
+## Target stack (locked)
 
 | Layer | Tool | Notes |
 |---|---|---|
@@ -29,13 +37,28 @@
 | STT | Deepgram Nova-3 streaming | |
 | LLM | OpenRouter — `anthropic/claude-haiku-4-5` in-call, `anthropic/claude-sonnet-4-6` post-call | Single API key |
 | TTS | Cartesia Sonic | Free tier covers demo |
-| **Deferred** | Modal + WhisperX canonical transcript | Interface designed, not implemented |
+| **Deferred** | Modal + WhisperX canonical transcript | Interface to be designed in Step 6 |
 
 ## Cost envelope
+
 - **Infra**: ~$0/mo (Oracle Always-Free + Neon free tier + user's existing subdomain)
 - **APIs**: ~$3–8 actual spend during build; signup credits likely cover all
 - **Ongoing at 1 call/day**: ~$12–15/mo steady state
 - User does NOT need the call to actually fire nightly — this is a demo-able portfolio artifact
+
+## Design steps — status
+
+| # | Step | Status | Authoritative source |
+|---|---|---|---|
+| 1 | C4 diagrams (LikeC4) | ✅ audit-passed | `docs/architecture/likec4/quotid.c4` |
+| 2 | ERD / data model | ✅ | `prisma/schema.prisma` (generates `docs/architecture/erd.md`) |
+| 3 | Temporal workflow | ✅ audit-passed | `docs/architecture/temporal-workflow.md` |
+| 4 | API contract (OpenAPI 3.1 + Server Actions) | ✅ audit-passed, Zalando-aligned | `docs/architecture/api/` (README + 2 YAML specs + server-actions.md) |
+| 5 | Pipecat pipeline | ✅ audit-passed | `docs/architecture/pipecat-pipeline.md` |
+| 6 | Modal transcription interface | ⏳ **NEXT** | To be written. |
+| 7+ | Scaffolding / implementation | ⏳ | Day 3 activity. |
+
+All five completed design docs are self-contained, internally consistent, and have been audited against live library/platform docs (Temporal Python SDK, Prisma 6, Pipecat current API, Zalando RESTful API Guidelines, OpenAPI 3.1, RFC 9457).
 
 ## What's done — file inventory
 
@@ -46,14 +69,9 @@
 **Build:** `npx likec4 build docs/architecture/likec4 -o docs/architecture/dist`
 **README:** `docs/architecture/likec4/README.md`
 
-Views defined:
-- `index` — C1 System Context (user + Quotid + external SaaS)
-- `containers` — C2 Container (5 containers on Oracle VM + Neon)
-- `production` — **Supplementary** Deployment (physical topology)
-- `callFlow` — Supplementary Dynamic (graph)
-- `callSequence` — Supplementary Dynamic (`variant sequence` UML-style)
+Views: `index` (C1), `containers` (C2), `production` (deployment), `callFlow` + `callSequence` (dynamic). Session 2 audit fixed a line 88 bug where Caddy was shown forwarding `/calls` publicly — corrected to match decision #14 (Docker-network internal only).
 
-**Stale files to delete (or leave, low priority):** `docs/architecture/c4-*.md` — earlier Mermaid versions superseded by the LikeC4 source. Kept because user hasn't confirmed deletion. If asked, delete them — they will drift.
+**Stale Mermaid files** `docs/architecture/c4-*.md` are superseded by the LikeC4 source. User has declined deletion; leave them alone.
 
 ### Step 2 — ERD / Data model ✅
 
@@ -62,126 +80,181 @@ Views defined:
 
 Models: `User`, `CallSchedule` (1:1 with User via `@unique` on FK), `CallSession`, `Transcript` (unique per `(callSessionId, kind)`), `JournalEntry` (optional 1:1 with CallSession).
 Enums: `CallStatus`, `TranscriptKind`, `TranscriptProvider` (Postgres native enums, `@@map`ped).
+IDs: `cuid(2)` — Prisma-native cuid2.
 Neon dual-URL pattern: `DATABASE_URL` (pooled via pgBouncer) + `DIRECT_URL` (bypass pooler for migrations).
 Naming: Prisma PascalCase singular → DB `snake_case` plural via `@@map`.
 
-### Step 4 — API contract 🟡 (partial)
+### Step 3 — Temporal workflow ✅
 
-Route map drafted per Zalando REST guidelines (nouns for routes, verbs only for function/activity names):
+**Authoritative source:** `docs/architecture/temporal-workflow.md`
 
-**Pipecat Bot Server (FastAPI):**
-- `POST /calls` — create outbound call (caller: Temporal worker)
-- `GET /calls/{call_sid}` — inspect state (ops/debug)
-- `GET /calls/{call_sid}/twiml` — TwiML for Twilio
-- `WSS /calls/{call_sid}/stream` — Media Streams
+Defines `JournalingWorkflow` (per-attempt, not per-user), 6 activity signatures with retry policies, schedule creation pattern, watchdog pattern, error taxonomy, idempotency keys, timeout summary. Python pseudocode provided; no implementation.
 
-**Next.js Route Handlers:**
-- `POST /api/webhooks/twilio/call-status` — watchdog webhook
-- `GET /api/journal-entries` — list (supports `?q`, `?cursor`, `?limit`, `?sort`)
-- `GET /api/journal-entries/{id}` — detail
-- `GET /api/call-schedules` — list
+**Key patterns:**
+- Async activity completion for `await_call` (20-min backstop, completed externally by Pipecat or watchdog webhook).
+- `activity_id="await-call"` hardcoded so watchdog doesn't need a stored task token.
+- Workflow IDs: scheduled path = `journal-{user_id}` + Temporal-auto-appended ISO-8601 fire time (verified behavior); manual path = `journal-{user_id}-manual-{YYYYMMDDTHHMMSS}` (**second precision**, session 2 audit changed from minute to second).
+- `summarize` retry policy = 2× fixed 10 s (session 2 audit tightened from 3× exponential).
+- `raise raise_complete_async()` — the function RETURNS an exception that MUST be raised; calling without `raise` silently makes the activity complete with None. Docstring in §3.1 calls this out.
 
-**Server Actions (internal RPC, not REST):** `updateCallSchedule`, `triggerTestCall`, `updateJournalEntry`, `deleteJournalEntry`.
+### Step 4 — API contract ✅
 
-Full OpenAPI spec not yet written. Documented deviation from Zalando: using `/api` prefix (Next.js convention, coexists with rendered pages).
+**Authoritative sources:** `docs/architecture/api/`
+- `README.md` — index, boundary map, WSS protocol (Twilio Media Streams), auth matrix, Zalando compliance table
+- `pipecat-bot.openapi.yaml` — OpenAPI 3.1 spec for Pipecat Bot Server (3 REST endpoints + WSS documented in README §4)
+- `nextjs.openapi.yaml` — OpenAPI 3.1 spec for Next.js Route Handlers (4 endpoints)
+- `server-actions.md` — TypeScript signatures for Server Actions (not REST, not in OpenAPI)
+
+**Zalando alignment: Option B** — `snake_case` on HTTP/JSON boundaries, `camelCase` in Server Actions (not REST). Only documented deviation: `/api` prefix (Next.js App Router convention). RFC 9457 Problem Details. Cursor pagination with `(sort_field_value, id)` compound tiebreaker. `q` substring-search param deliberately omitted for MVP (YAGNI; add later if needed).
+
+**Known gaps (intentional deferrals):** auth login/logout Route Handlers (`POST /api/auth/{login,logout}`) not yet specified. Passcode-on-User was the chosen default but the session-issuance flow needs design before scaffolding the web surface.
+
+### Step 5 — Pipecat pipeline ✅
+
+**Authoritative source:** `docs/architecture/pipecat-pipeline.md`
+
+Defines pipeline topology, turn detection (Silero VAD + `LocalSmartTurnAnalyzerV3`), interruption handling, audio format (μ-law 8 kHz wire, PCM 8 kHz internal), TTS subclass hierarchy with Modal seam (decision #7), `TranscriptAccumulator` (custom `FrameProcessor`), latency budget (~980 ms typical, ~2.1 s worst case; target 1.0–1.5 s), error handling, open implementation questions.
+
+**Key patterns:**
+- Pipeline: `transport.input() → stt → transcript_accumulator → user_aggregator → llm → tts → transport.output() → assistant_aggregator`.
+- `TranscriptAccumulator(context)` reads user-side transcripts from `TranscriptionFrame`s with audio timestamps, assistant-side turns from `LLMContext.messages` at pipeline end. Merge happens in `build_outcome`.
+- `filter_incomplete_user_turns` intentionally NOT set — redundant with SmartTurn, adds per-turn LLM cost (session 2 audit removed).
+- `QuotidCartesiaTTSService` subclass = empty-body named swap point for future `ModalTTSService`.
+- Bot Server MUST run `uvicorn --workers=1` — in-process correlation registry for `{call_sid → (wf_id, act_id, cs_id)}`.
 
 ## Key design decisions — DO NOT re-litigate
 
-1. **Temporal ↔ Pipecat handoff = async activity completion.** Worker activity calls `activity.raise_complete_async()` after passing `wf_id + activity_id` to Pipecat via `POST /calls`. Pipecat calls `temporal_client.get_async_activity_handle(wf_id, activity_id).complete(payload)` on session end. `start_to_close_timeout = 20 min` as backstop.
-2. **Twilio `statusCallback` = watchdog** for when Pipecat crashes. Signals workflow via the `/api/webhooks/twilio/call-status` Route Handler.
-3. **"User didn't pick up" is a workflow branch, not an activity retry.** Twilio 5xx is retryable; `no-answer` is data.
-4. **Scheduling uses Temporal Schedules (one per user, IANA timezone)**, not cron workflows or in-workflow sleep loops.
-5. **Only Caddy is public.** Pipecat's `/calls` POST is Docker-network only (Caddy matcher); `/twiml` and `/stream` are public because Twilio needs them.
-6. **Next.js merges frontend + API** — no dedicated Node service. Server Actions for internal mutations, Route Handlers for external + client-fetched reads.
-7. **Pipecat's `TTSService` base class is sufficient** for hosted-to-Modal swap. Subclass directly; no wrapper layer.
-8. **OpenRouter, not direct Anthropic.** One key, model selected per call (`anthropic/claude-haiku-4-5` in-call, `anthropic/claude-sonnet-4-6` summary). Prompt caching works through OpenRouter for Anthropic models.
-9. **Prisma 6, not 7.** v7 moved connection config to `prisma.config.ts`; ecosystem (Supabase, likely `prisma-erd-generator`) hasn't caught up. Revisit post-launch.
-10. **LLM split:** Haiku 4.5 for in-call turns (latency), Sonnet 4.6 for post-call summary (quality).
-11. **Audio format:** μ-law 8 kHz on Twilio leg, PCM internally. Set `PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000)` on Pipecat.
-12. **Latency target: 1.0–1.5 s voice-to-voice.** Sub-1 s is not realistic over PSTN (marketing claims assume WebRTC).
+These are the decisions already settled. If the user wants to reopen any, engage, but surface that it's locked and ask what changed.
 
-## Open questions the user should answer before Step 3
+**Stack choices (locked in session 1):**
+1. **Prisma 6, not 7** — v7 moved connection config to `prisma.config.ts`; ecosystem (Supabase, `prisma-erd-generator`) hasn't caught up.
+2. **OpenRouter, not direct Anthropic** — one key, model selected per call. Prompt caching works through OpenRouter for Anthropic models.
+3. **LLM split:** `anthropic/claude-haiku-4-5` for in-call turns (latency), `anthropic/claude-sonnet-4-6` for post-call summary (quality).
+4. **Next.js merges frontend + API** — no dedicated Node service. Server Actions for internal mutations, Route Handlers for external + client-fetched reads.
+5. **Oracle Cloud Ampere A1 Always-Free** (4 vCPU / 24 GB), Docker Compose, Caddy (not nginx). Fallback: Hetzner CAX11 €3.79/mo.
+6. **Neon Postgres** dual-URL pattern: `DATABASE_URL` (pooled via pgBouncer) + `DIRECT_URL` (bypass pooler for DDL migrations).
 
-1. **Phone number** — use an existing Twilio number or buy one as part of MVP setup?
-2. **Passcode storage** — on `User` table directly, or separate `AuthMethod` table? (I recommend on User for MVP.)
-3. **Python worker DB access** — `prisma-client-python` (typed, matches Next.js) or `asyncpg` + hand-written SQL (lighter, more Pythonic)?
-4. **Recording retention** — keep Twilio's hosted URL (ephemeral) or copy recordings to user-owned object storage?
+**Temporal / call-flow patterns (locked in session 1, audited in session 2):**
+7. **Temporal ↔ Pipecat handoff = async activity completion.** Worker's `await_call` activity calls `raise raise_complete_async()` (note the `raise`!). Pipecat or watchdog completes via `get_async_activity_handle(wf_id, "await-call").complete(payload)`. 20-min `start_to_close_timeout` backstop.
+8. **Twilio `statusCallback` = watchdog** for Pipecat crashes. Signals workflow via `/api/webhooks/twilio/call-status` Route Handler. Only abnormal statuses (`no-answer`, `failed`, `busy`, `canceled`) trigger async completion; normal `completed` status is NOT forwarded (Pipecat is authoritative completer on happy path).
+9. **"User didn't pick up" is a workflow branch, not an activity retry.** Twilio 5xx is retryable; `no-answer` is data, returned from the activity as a normal `CallOutcome`.
+10. **Scheduling uses Temporal Schedules** (one per user, IANA timezone on `ScheduleSpec.time_zone_name`, calendar-spec-based at 21:00 local). Schedule fires with `journal-{user_id}` base workflow ID; Temporal auto-appends fire timestamp for uniqueness.
+11. **Pipecat's `TTSService` base class is sufficient** for hosted→Modal swap. Subclass directly; no wrapper layer. `QuotidCartesiaTTSService` (MVP) and future `ModalTTSService` are siblings under `TTSService`.
+12. **Audio format:** μ-law 8 kHz on Twilio leg, PCM 8 kHz internally. `PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000)`.
+13. **Latency target: 1.0–1.5 s voice-to-voice.** Sub-1 s is not realistic over PSTN (marketing claims assume WebRTC).
 
-If user doesn't answer, proceed with: existing Twilio number (assume they'll buy/provision one), passcode on User, `prisma-client-python` for consistency, Twilio-hosted URLs for MVP.
+**Security / networking (locked in session 1):**
+14. **Only Caddy is public.** Pipecat's `POST /calls` is Docker-network only (Caddy matcher excludes). Pipecat's `/calls/{sid}/twiml` and `/calls/{sid}/stream` are public because Twilio must reach them; authenticated via `X-Twilio-Signature` (including on the WSS upgrade request).
 
-## Task status
+**Deferred (interface to be designed in Step 6):**
+15. **Modal + WhisperX canonical transcript** — to be added as a second `Transcript` row (kind=`CANONICAL`) alongside the MVP realtime Deepgram transcript. No schema migration needed; the `TranscriptKind` enum already has the slot.
 
-| # | Step | Status |
-|---|---|---|
-| 1 | C4 diagrams (LikeC4) | ✅ completed |
-| 2 | ERD / data model (Prisma schema) | ✅ completed |
-| 3 | Temporal workflow | ⏳ **NEXT** |
-| 4 | API contract | 🟡 in_progress (route map done, OpenAPI pending) |
-| 5 | Pipecat pipeline | ⏳ pending |
-| 6 | Modal integration (architected, deferred) | ⏳ pending |
+**Defaults chosen session 2 (settles session 1's open questions):**
+16. Phone number → provision a new Twilio number. Passcode → on `User` table (no separate `AuthMethod`). Python worker DB access → `prisma-client-python` (typed, mirrors Next.js). Recording retention → Twilio-hosted URLs (ephemeral) for MVP.
 
-## Plan for tomorrow
+**API naming (locked in session 2):**
+17. **Zalando Option B:** `snake_case` on HTTP/JSON boundaries (Pipecat REST, Next.js REST, webhook bodies), `camelCase` in Server Actions (not REST, TS-native). `CallSid`/`CallStatus` etc. from Twilio kept PascalCase (Twilio's contract). One documented deviation: `/api` prefix on Next.js routes.
 
-**Day goal:** finish all remaining design (Steps 3, 4, 5, 6) so day 3 is pure scaffolding.
+## Open questions — blocking Step 6 / scaffolding
 
-1. Fresh Claude reads this handoff end-to-end.
-2. Ask user for answers to the 4 open questions (or note the defaults used).
-3. **Step 3 — Temporal workflow design**:
-   - `JournalingWorkflow` class signature + state machine
-   - Activities: `sync_schedule`, `initiate_call`, `await_call` (async completion), `summarize`, `store_entry`, + watchdog-triggered `handle_missed_call`
-   - Retry policies per activity (which are retryable, which are non-retryable `ApplicationError`)
-   - Schedule creation pattern (one Temporal Schedule per `CallSchedule` row)
-   - Deliver as a design doc + Python pseudocode signatures; no implementation yet.
-4. **Step 4 — Finish API contract**: write OpenAPI 3.1 spec for the Next.js Route Handlers + Pipecat server. There is an `openapi-spec-generation` skill available; consider invoking it.
-5. **Step 5 — Pipecat pipeline design**: STT→LLM→TTS graph with turn detection (Silero VAD + SmartTurnAnalyzer), interruption handling, Twilio serializer config, TTS service class hierarchy showing where the future Modal adapter slots in.
-6. **Step 6 — Modal interface**: define the `TranscriptProvider` Python protocol that both the Deepgram-batch MVP adapter and the future `ModalWhisperXProvider` will implement. Activity signature + fallback policy.
+**1. What does "via WhatsApp" mean for the demo?** (session 2, unresolved)
 
-## Environment / communication notes for fresh Claude
+User said: *"the demo call will have to be made to a german number though, or via whatsapp"*. Interpretation matters:
 
-- **Caveman communication mode is active** via a session-start hook. Default to terse fragment-style prose. Exceptions: **code/commits/security write normal prose**; **teaching/learning-style questions** also warrant normal explanatory prose. The user invokes `/caveman-help` if they want the mode reference.
-- **Learning output style** was used throughout this session. The user frequently asked "what is X" (PSTN, PCM, gRPC, pgBouncer, DDL, UML vs ERD) and expected ~200–400 word substantive explanations with tables and practical takeaways. Continue this register for conceptual questions.
-- **User style**: pushes back on over-conservative recommendations, wants specific cut lists over hedging, values honest assessments. Will challenge architectural choices — respond with reasoning, not deference.
-- **Greenfield execution mode hook** is active. Do not park in planning — but respect explicit user requests for design work (which this entire session has been).
-- **Vercel plugin session context** is injected but only apply when the user's request is Vercel-adjacent. Quotid does not deploy to Vercel (Oracle VM + Docker Compose).
+- **A.** Live WhatsApp voice call → **not feasible** via programmable APIs. Would require redesign.
+- **B.** WhatsApp voice messages (async audio) → feasible via Twilio WhatsApp Business API with media attachments, but is a **different pipeline** — no real-time turn-taking, no VAD/SmartTurn, no interruption handling. Current Pipecat design doesn't apply.
+- **C.** WhatsApp is just the interviewer-facing meeting medium (screen share); product is still PSTN. Current architecture is fine.
+- **D.** Fallback if Twilio PSTN doesn't work for regulatory/capacity reasons. Would mean rebuilding the voice pipeline.
+
+**Most likely is C**, but confirm before proceeding. If it's A, B, or D, design needs rework.
+
+**2. Oracle Cloud home region.** (session 2, awaiting question 1 answer)
+
+- Home region is **permanent** per account; affects free tier availability.
+- German phone demo → Frankfurt VM is slight voice-latency winner (~50–100 ms) but A1 capacity is historically bad there.
+- US phone demo or WhatsApp path → **US East (Ashburn)** is colocated with Neon, Twilio US edge, Anthropic/Deepgram/Cartesia. A1 typically easier to provision.
+- **Current recommendation: US East (Ashburn)** for operational reliability; fallback Phoenix if Ashburn A1 capacity unavailable. Deadline risk > voice polish for 3-day ship target.
+- User should try provisioning the VM *today* regardless of code progress — A1 provisioning can take hours to days ("out of host capacity" retries).
+
+**3. Auth login/logout flow.** (session 2, Step 4 known gap)
+
+Route Handlers `POST /api/auth/login` and `POST /api/auth/logout` are referenced in the API spec's security schemes but not spec'd. Passcode-on-User was the chosen default. Needs ~10 min of spec work before web surface scaffolding. Shape expected: form POST with passcode → validate → issue `quotid_session` cookie → redirect.
+
+**4. Step 5 open implementation questions** (defer until scaffolding):
+- Cartesia voice selection (MVP: env var with one hardcoded voice).
+- System prompt content (Storyworthy-style; prompt engineering post-scaffold).
+- Conversation-end detection strategy (likely user-signal + 10-min hard cap).
+- Barge-in during bot opening line (currently allowed; may want 3 s lockout).
+- SmartTurn model-instance sharing across concurrent pipelines (benchmark during impl).
+
+## Next actions — priority order
+
+1. **Resolve open question #1** (WhatsApp interpretation) — 2 minutes.
+2. **Resolve open question #2** (Oracle region) — 2 minutes + start A1 provisioning retry loop in background.
+3. **Write Step 6** (Modal transcription interface) — ~30 min. Define `TranscriptProvider` Python protocol, MVP `DeepgramBatchTranscriptProvider` adapter, future `ModalWhisperXProvider` sketch, activity signature in `JournalingWorkflow` (optional canonical transcript step), fallback policy if Modal is down.
+4. **Write auth login/logout spec** — ~10 min. Add to `nextjs.openapi.yaml` + update server-actions.md cross-refs.
+5. **Begin scaffolding (Day 3)** — per the repo layout sketch below. Docker Compose + Caddyfile + app directories. Use `prisma generate` to emit the client; set up `temporal server start-dev`; FastAPI skeleton; Next.js 16 init.
 
 ## Repo state
 
-Current working directory: `/home/john/repos/quotid` (NOT a git repo yet). Contents:
+Working directory: `/Users/john/repos/quotid` on this machine. Fresh session on another machine: clone the repo, everything needed is in git.
+
+**Current tree (end of session 2):**
 
 ```
 quotid/
-├── .claude/settings.local.json
+├── .claude/
+│   └── settings.local.json                    (gitignored)
+├── .gitignore
+├── .likec4/                                   (preview cache; gitignored)
 ├── docs/
-│   ├── SESSION_HANDOFF.md                 ← this file
+│   ├── SESSION_HANDOFF.md                     ← this file
 │   └── architecture/
-│       ├── c4-context.md                  ← stale Mermaid (delete when confirmed)
-│       ├── c4-containers.md               ← stale Mermaid (delete when confirmed)
-│       ├── c4-deployment.md               ← stale Mermaid (delete when confirmed)
-│       ├── c4-dynamic-call-flow.md        ← stale Mermaid (delete when confirmed)
-│       └── likec4/
-│           ├── quotid.c4                  ← authoritative architecture source
-│           └── README.md
+│       ├── c4-context.md                      (stale Mermaid; leave alone)
+│       ├── c4-containers.md                   (stale Mermaid; leave alone)
+│       ├── c4-deployment.md                   (stale Mermaid; leave alone)
+│       ├── c4-dynamic-call-flow.md            (stale Mermaid; leave alone)
+│       ├── erd.md                             (generated by prisma-erd-generator)
+│       ├── likec4/
+│       │   ├── quotid.c4                      ← Step 1 source of truth
+│       │   └── README.md
+│       ├── temporal-workflow.md               ← Step 3 source of truth
+│       ├── pipecat-pipeline.md                ← Step 5 source of truth
+│       └── api/
+│           ├── README.md                      ← Step 4 index + boundary map
+│           ├── pipecat-bot.openapi.yaml       ← Step 4
+│           ├── nextjs.openapi.yaml            ← Step 4
+│           └── server-actions.md              ← Step 4
 └── prisma/
-    └── schema.prisma                      ← authoritative data model source
+    └── schema.prisma                          ← Step 2 source of truth
 ```
 
-Planned on day 3:
+**Planned for Day 3 scaffolding:**
 
 ```
 quotid/
-├── compose.yaml                           ← Docker Compose
-├── Caddyfile                              ← Caddy config
+├── compose.yaml                               ← Docker Compose
+├── Caddyfile                                  ← Caddy config
 ├── apps/
-│   ├── web/                               ← Next.js 16
-│   └── pipecat-bot/                       ← Python FastAPI + Pipecat
+│   ├── web/                                   ← Next.js 16
+│   └── pipecat-bot/                           ← Python FastAPI + Pipecat
 ├── workers/
-│   └── temporal-worker/                   ← Python Temporal worker
+│   └── temporal-worker/                       ← Python Temporal worker
 ├── packages/
-│   └── shared-types/                      ← optional: TS types generated from Prisma
+│   └── shared-types/                          ← optional: TS types generated from Prisma
 └── prisma/
     └── schema.prisma
 ```
 
+## Environment / communication notes for fresh Claude
+
+- **User style**: terse-preferring ("caveman mode"), senior-level engineer, pushes back on hedging, wants specific cut lists. Exception: conceptual questions ("what is X") warrant ~200–400 word substantive explanations.
+- **Learning output style** is used throughout — if asked conceptual questions, use normal explanatory prose.
+- **For design work**, deliver the artifact then summarize; don't ask for permission repeatedly. User confirmed "no reason not to" tone is welcome.
+- **MUST vs SHOULD matters**: user asked for Zalando alignment and drew the line at "MUST violations need strong structural reasons." Bring up rule-strength distinction when proposing tradeoffs.
+- **Memory system**: this user's previous machine has `~/.claude/projects/-Users-john-repos-quotid/memory/` with user_role, project_quotid, project_decisions, reference_handoff files. All their content is subsumed by this handoff; a fresh session on a new machine doesn't need them.
+- **The handoff itself** is the session-to-session source of truth. When meaningful progress happens, update this file before committing.
+
 ---
 
-**First thing for fresh Claude to say:** "Read SESSION_HANDOFF.md end-to-end. Answer these 4 open questions so I can proceed with Step 3 (Temporal workflow design): [list the 4 questions]."
+**Session 2 commits:** steps 3–5 docs, api/ directory, likec4 bug fix, gitignore, this handoff update. All in one atomic commit.

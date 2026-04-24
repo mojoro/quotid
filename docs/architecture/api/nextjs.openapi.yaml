@@ -1,0 +1,356 @@
+openapi: 3.1.0
+info:
+  title: Quotid Next.js API
+  version: 0.1.0
+  description: |
+    HTTP endpoints served by Next.js Route Handlers under `/api/*`. Two
+    audiences:
+
+    1. **Browser (TanStack Query)** — reads `/api/journal-entries` and
+       `/api/call-schedules`. Mutations happen via Server Actions (see
+       `docs/architecture/api/server-actions.md`), not these routes.
+    2. **Twilio** — posts call lifecycle events to
+       `/api/webhooks/twilio/call-status` (watchdog; see
+       `docs/architecture/temporal-workflow.md` §5).
+
+    **Naming convention:** JSON property names use `snake_case` per Zalando
+    guidelines (MUST rule). A boundary codec in Next.js transforms Prisma's
+    camelCase client output to snake_case on response. Exception: the
+    Twilio statusCallback request body is PascalCase because Twilio controls
+    that contract.
+
+    **Not for external API consumers.** No stability commitment; no
+    public versioning strategy.
+  contact:
+    name: Quotid
+    url: https://github.com/your-username/quotid
+
+servers:
+  - url: https://quotid.example.com/api
+    description: Production.
+  - url: http://localhost:3000/api
+    description: Local dev.
+
+tags:
+  - name: journal-entries
+    description: User-facing journal data.
+  - name: call-schedules
+    description: When the user wants to be called.
+  - name: webhooks
+    description: Inbound webhooks from external services.
+
+paths:
+  /journal-entries:
+    get:
+      tags: [journal-entries]
+      summary: List journal entries for the authenticated user.
+      description: |
+        Cursor-paginated. Default sort is `entry_date desc, created_at desc`.
+
+        **Cursor encoding (opaque to clients; documented here for
+        implementers):** the cursor encodes the full compound sort key
+        `(sort_field_value, id)`, base64-encoded. `id` is the tie-breaker
+        needed when two rows share the same `sort_field_value` (e.g., two
+        entries on the same `entry_date`). Implementation: Prisma's
+        `cursor: { id: ... }` alone is NOT sufficient; use a
+        `(sort_field_value, id) > cursor.tuple` WHERE clause via Prisma
+        raw SQL or a compound-index-aware query. Without the tie-breaker,
+        rows at page boundaries get skipped or duplicated.
+
+        Full-text / substring filtering is not supported in this version;
+        the journal UI is chronological scroll only. (A `q` param may be
+        added later once there's enough data to justify the pg_trgm GIN
+        index work.)
+      operationId: listJournalEntries
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Opaque cursor token. Returned as `next_cursor` on the previous
+            page; absent / null indicates the end of results.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Capped at 100 server-side.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: sort
+          in: query
+          required: false
+          description: Sort axis. Only two options for MVP.
+          schema:
+            type: string
+            enum: [entry_date, created_at]
+            default: entry_date
+      responses:
+        '200':
+          description: Paginated page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntryPage'
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+
+  /journal-entries/{id}:
+    get:
+      tags: [journal-entries]
+      summary: Fetch a single journal entry.
+      operationId: getJournalEntry
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/EntryIdPath'
+      responses:
+        '200':
+          description: The entry.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JournalEntry' }
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+
+  /call-schedules:
+    get:
+      tags: [call-schedules]
+      summary: Get the authenticated user's call schedule.
+      description: |
+        Returns a list for API-shape consistency, but MVP is single-user with
+        one schedule row — the list will always be 0 or 1 entries. Mutations
+        go through the `updateCallSchedule` Server Action.
+      operationId: listCallSchedules
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: List of call schedules (0 or 1 items in MVP).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/CallSchedule' }
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+
+  /webhooks/twilio/call-status:
+    post:
+      tags: [webhooks]
+      summary: Twilio statusCallback — watchdog for Pipecat crashes.
+      description: |
+        Triggered by Twilio on every call lifecycle event. For the watchdog
+        flow we only care about abnormal statuses: `no-answer`, `failed`,
+        `busy`, `canceled`. When one fires, the handler completes the
+        corresponding Temporal `await-call` activity externally with a
+        `CallOutcome(status=FAILED|NO_ANSWER)` payload.
+
+        Normal `completed` status is **NOT** forwarded to Temporal — Pipecat
+        is the authoritative completer on the happy path. See
+        `docs/architecture/temporal-workflow.md` §5.
+
+        The handler must return 200 fast (< 15 s) to keep Twilio from
+        retrying; all work happens synchronously but is kept minimal
+        (DB lookup + one Temporal client call).
+
+        **Public.** Authenticated via `X-Twilio-Signature`.
+
+        **Note on body casing:** Twilio sends form-encoded PascalCase field
+        names (`CallSid`, `CallStatus`). This is Twilio's contract; we can't
+        change it. All *other* request/response bodies in this API are
+        snake_case per the convention above.
+      operationId: twilioCallStatus
+      security:
+        - twilioSignature: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/TwilioStatusCallback' }
+      responses:
+        '200':
+          description: Acknowledgment. Body empty.
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: quotid_session
+      description: |
+        Opaque session ID, issued after passcode login (see MVP auth design).
+        Validated by Next.js middleware; Server Actions and these Route
+        Handlers both read it via `cookies()`.
+    twilioSignature:
+      type: apiKey
+      in: header
+      name: X-Twilio-Signature
+      description: |
+        HMAC-SHA1 of request URL + sorted form body, keyed by Twilio auth
+        token. Validated with the Twilio Node SDK's `validateRequest`.
+
+  parameters:
+    EntryIdPath:
+      name: id
+      in: path
+      required: true
+      description: JournalEntry cuid2 ID.
+      schema:
+        type: string
+        minLength: 20
+        maxLength: 40
+
+  responses:
+    ProblemResponse:
+      description: Error — see status code and problem object for details.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  schemas:
+    JournalEntry:
+      type: object
+      required:
+        [id, user_id, title, body, generated_body, is_edited, entry_date, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: cuid2.
+        user_id:
+          type: string
+        call_session_id:
+          type: [string, 'null']
+          description: Null iff the entry was created without an associated call (e.g., manual entry — not in MVP).
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        body:
+          type: string
+          description: Current text. Edited by the user via `updateJournalEntry` action.
+        generated_body:
+          type: string
+          description: Original LLM output. Frozen at creation; preserved across user edits.
+        is_edited:
+          type: boolean
+          description: True iff `body` has diverged from `generated_body`.
+        entry_date:
+          type: string
+          format: date
+          description: 'The date the entry is *about* (e.g., "yesterday"), not when it was generated.'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    JournalEntryPage:
+      type: object
+      required: [items, next_cursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/JournalEntry' }
+        next_cursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page; `null` when no more pages.
+
+    CallSchedule:
+      type: object
+      required:
+        [id, user_id, local_time_of_day, enabled, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        local_time_of_day:
+          type: string
+          pattern: '^([01]\d|2[0-3]):[0-5]\d$'
+          description: 24-hour HH:MM in the user's configured timezone.
+          example: '21:00'
+        enabled:
+          type: boolean
+        temporal_schedule_id:
+          type: [string, 'null']
+          description: |
+            Temporal Schedule resource ID (form `journal:{user_id}`). Null
+            only transiently — set on first successful sync.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TwilioStatusCallback:
+      description: |
+        Subset of Twilio's `statusCallback` payload that we use. Full
+        reference: https://www.twilio.com/docs/voice/api/call-resource#statuscallback-events
+
+        **Casing exception:** PascalCase because Twilio controls the wire
+        format. All other Quotid API schemas use snake_case.
+      type: object
+      required: [CallSid, CallStatus, AccountSid]
+      additionalProperties: true
+      properties:
+        CallSid:
+          type: string
+          pattern: '^CA[a-fA-F0-9]{32}$'
+        CallStatus:
+          type: string
+          enum:
+            [queued, ringing, in-progress, completed, busy, no-answer, failed, canceled]
+          description: |
+            Watchdog cares about `no-answer`, `failed`, `busy`, `canceled`.
+            All others are observational.
+        CallDuration:
+          type: string
+          description: Integer seconds as a string (Twilio form-encodes everything).
+        AccountSid:
+          type: string
+        From:
+          type: string
+        To:
+          type: string
+
+    ProblemDetails:
+      description: |
+        RFC 9457 Problem Details (obsoletes RFC 7807). Field names are
+        standardized by the RFC; `trace_id` is a Quotid-specific extension.
+      type: object
+      required: [type, title, status]
+      additionalProperties: true
+      properties:
+        type:
+          type: string
+          format: uri
+          default: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri
+        trace_id:
+          type: string
+          description: Server-side trace ID for debugging. Quotid extension.

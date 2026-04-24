@@ -1,0 +1,272 @@
+openapi: 3.1.0
+info:
+  title: Quotid Pipecat Bot Server
+  version: 0.1.0
+  description: |
+    Python FastAPI service that bridges Temporal to Twilio and runs the per-call
+    Pipecat pipeline (STT → LLM → TTS). Three REST endpoints plus a WebSocket
+    endpoint (documented in `docs/architecture/api/README.md` §4 — WebSockets
+    don't fit OpenAPI).
+
+    **Topology:** runs inside the Oracle VM's Docker network. Caddy exposes
+    `/calls/{call_sid}/twiml` and `/calls/{call_sid}/stream` publicly because
+    Twilio must reach them; `POST /calls` and `GET /calls/{call_sid}` are
+    internal-only (Caddy matcher blocks external access — see decision #14 in
+    `docs/SESSION_HANDOFF.md`).
+
+    **Naming convention:** JSON property names use `snake_case` per Zalando
+    guidelines. Path segments use kebab-case. `operationId` values use
+    camelCase (tooling convention, not a wire-format field).
+  contact:
+    name: Quotid
+    url: https://github.com/your-username/quotid
+
+servers:
+  - url: http://pipecat-bot:8000
+    description: Docker-network internal URL (used by Temporal worker).
+  - url: https://quotid.example.com
+    description: Public URL via Caddy (only `/twiml` and `/stream` reachable).
+
+tags:
+  - name: calls
+    description: Outbound call lifecycle.
+  - name: twilio
+    description: Endpoints called by Twilio's platform, not by our code.
+
+paths:
+  /calls:
+    post:
+      tags: [calls]
+      summary: Initiate an outbound call.
+      description: |
+        Invoked by the Temporal worker's `initiate_call` activity. Creates a
+        Twilio outbound call (`twilio.calls.create`) pointed at the TwiML
+        endpoint below, stashes the `workflow_id` + `activity_id` so Pipecat
+        can async-complete the corresponding Temporal activity on session end.
+
+        **Internal only.** Caddy denies external traffic to this path.
+      operationId: createCall
+      security:
+        - internalNetwork: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCallRequest'
+            examples:
+              typical:
+                value:
+                  workflow_id: journal-user_abc123-2026-04-24T21:00:00Z
+                  activity_id: await-call
+                  call_session_id: cs_01HR9VXYZ456
+                  to_phone: '+14155551234'
+      responses:
+        '201':
+          description: Call accepted by Twilio.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateCallResponse'
+        default:
+          description: Error — see status code and problem object.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /calls/{call_sid}:
+    get:
+      tags: [calls]
+      summary: Inspect current call state (ops / debug).
+      description: |
+        In-memory state of an active call as Pipecat sees it. Returns 404 once
+        the pipeline has torn down — source of truth for post-call state is
+        the `call_sessions` DB row, not this endpoint.
+
+        **Internal only.**
+      operationId: getCall
+      security:
+        - internalNetwork: []
+      parameters:
+        - $ref: '#/components/parameters/CallSidPath'
+      responses:
+        '200':
+          description: Call state snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallState'
+        default:
+          description: Error — see status code and problem object.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /calls/{call_sid}/twiml:
+    get:
+      tags: [twilio]
+      summary: Return TwiML instructing Twilio to open the Media Stream.
+      description: |
+        Twilio fetches this after accepting the call. Response is XML, not JSON.
+        Body is `<Response><Connect><Stream url="wss://.../calls/{call_sid}/stream"/></Connect></Response>`.
+
+        **Public.** Authenticated via Twilio signature (`X-Twilio-Signature` header).
+      operationId: getCallTwiml
+      security:
+        - twilioSignature: []
+      parameters:
+        - $ref: '#/components/parameters/CallSidPath'
+      responses:
+        '200':
+          description: TwiML XML.
+          content:
+            text/xml:
+              schema:
+                type: string
+              example: |
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Response>
+                  <Connect>
+                    <Stream url="wss://quotid.example.com/calls/CA1234.../stream"/>
+                  </Connect>
+                </Response>
+        default:
+          description: Error — see status code and problem object.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+components:
+  securitySchemes:
+    internalNetwork:
+      type: apiKey
+      in: header
+      name: X-Internal-Auth
+      description: |
+        Not a real API key. This scheme signals "access requires being on the
+        Docker network." Enforced by Caddy's request matcher, not by the
+        FastAPI app. Declared here so tooling understands these endpoints
+        aren't internet-facing.
+    twilioSignature:
+      type: apiKey
+      in: header
+      name: X-Twilio-Signature
+      description: |
+        HMAC-SHA1 of the request URL + sorted form body, keyed by the Twilio
+        auth token. Validated with the `twilio` Python SDK's
+        `RequestValidator.validate(url, params, signature)`.
+
+  parameters:
+    CallSidPath:
+      name: call_sid
+      in: path
+      required: true
+      description: Twilio Call SID (`CA` + 32 hex chars).
+      schema:
+        type: string
+        pattern: '^CA[a-fA-F0-9]{32}$'
+        example: CA1234567890abcdef1234567890abcdef
+
+  schemas:
+    CreateCallRequest:
+      type: object
+      required: [workflow_id, activity_id, call_session_id, to_phone]
+      additionalProperties: false
+      properties:
+        workflow_id:
+          type: string
+          description: |
+            Temporal workflow ID of the `JournalingWorkflow` run that
+            triggered this call. Used to construct the async activity handle
+            for completion on session end.
+          example: journal-user_abc123-2026-04-24T21:00:00Z
+        activity_id:
+          type: string
+          description: |
+            Temporal activity ID within the workflow. Hardcoded to
+            `"await-call"` — see `docs/architecture/temporal-workflow.md` §5.
+          const: await-call
+        call_session_id:
+          type: string
+          description: Prisma `CallSession.id`. Used only for logging / correlation.
+          example: cs_01HR9VXYZ456
+        to_phone:
+          type: string
+          description: E.164-formatted phone number.
+          pattern: '^\+[1-9]\d{6,14}$'
+          example: '+14155551234'
+
+    CreateCallResponse:
+      type: object
+      required: [call_sid]
+      additionalProperties: false
+      properties:
+        call_sid:
+          type: string
+          description: Twilio-assigned Call SID. Persisted to `call_sessions.twilio_call_sid`.
+          pattern: '^CA[a-fA-F0-9]{32}$'
+          example: CA1234567890abcdef1234567890abcdef
+
+    CallState:
+      type: object
+      required: [call_sid, workflow_id, status, started_at]
+      additionalProperties: false
+      properties:
+        call_sid:
+          type: string
+          pattern: '^CA[a-fA-F0-9]{32}$'
+        workflow_id:
+          type: string
+        call_session_id:
+          type: string
+        status:
+          type: string
+          enum: [dialing, connected, ended]
+          description: |
+            In-memory view of the pipeline state. Not the same enum as
+            `CallStatus` in the DB — this is Pipecat's live pipeline state,
+            which is finer-grained than the persisted call-attempt status.
+        started_at:
+          type: string
+          format: date-time
+        turn_count:
+          type: integer
+          minimum: 0
+          description: Number of completed user-assistant turns so far.
+
+    ProblemDetails:
+      description: |
+        RFC 9457 Problem Details (obsoletes RFC 7807). Zalando-compliant
+        error envelope. Field names are standardized by the RFC and kept
+        as defined; `trace_id` is a Quotid-specific extension.
+      type: object
+      required: [type, title, status]
+      additionalProperties: true
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI reference identifying the problem type.
+          default: about:blank
+        title:
+          type: string
+          description: Short, human-readable summary.
+        status:
+          type: integer
+          description: HTTP status code.
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        instance:
+          type: string
+          format: uri
+          description: URI reference identifying this specific occurrence.
+        trace_id:
+          type: string
+          description: Server-side trace ID for debugging. Quotid extension.
+      example:
+        type: https://errors.quotid.example.com/invalid-phone
+        title: Invalid phone number
+        status: 400
+        detail: 'to_phone must be E.164: expected +[1-9]\d{6,14}, got "415-555-1234".'
+        instance: /calls

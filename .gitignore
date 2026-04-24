@@ -31,3 +31,6 @@ Thumbs.db
 
 # claude local
 .claude/settings.local.json
+
+# likec4 preview cache
+.likec4/

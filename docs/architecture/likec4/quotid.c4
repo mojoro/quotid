@@ -85,7 +85,9 @@ model {
 
   // Inside Quotid
   quotid.caddy -> quotid.web 'Forwards web traffic' { technology 'HTTP' }
-  quotid.caddy -> quotid.pipecat 'Forwards /calls, /calls/{sid}/twiml, /calls/{sid}/stream' { technology 'HTTP / WSS' }
+  // Caddy only forwards the public Twilio-reachable paths. POST /calls is
+  // Docker-network internal (worker → pipecat direct) per decision #14.
+  quotid.caddy -> quotid.pipecat 'Forwards /calls/{sid}/twiml, /calls/{sid}/stream' { technology 'HTTP / WSS' }
 
   quotid.web -[grpc]-> quotid.temporal 'Triggers workflows, queries state'
   quotid.web -[pg]-> neon 'CRUD via Prisma'
