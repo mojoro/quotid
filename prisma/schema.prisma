@@ -1,0 +1,163 @@
+// Quotid — Prisma schema.
+// Single source of truth for the database, the generated Prisma Client, and the ERD.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Renders an ERD into docs/architecture/erd.md on every `prisma generate`.
+// Mermaid inside Markdown → GitHub renders it inline.
+generator erd {
+  provider                  = "prisma-erd-generator"
+  output                    = "../docs/architecture/erd.md"
+  theme                     = "forest"
+  includeRelationFromFields = true
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")  // Neon pooled connection (pgBouncer) — used by the app at runtime
+  directUrl = env("DIRECT_URL")    // Neon direct connection — used by `prisma migrate` (pooler can't run DDL)
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────
+// MVP is single-user (me), but the schema assumes multi-user so that
+// adding Clerk or a proper auth story later is a dependency change, not a
+// data migration.
+
+model User {
+  id          String   @id @default(cuid(2))
+  email       String   @unique
+  phoneNumber String   @unique @map("phone_number") // E.164, e.g. "+14155551234"
+  timezone    String                                // IANA, e.g. "America/Chicago"
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  callSchedule   CallSchedule?
+  callSessions   CallSession[]
+  journalEntries JournalEntry[]
+
+  @@map("users")
+}
+
+// ─── Call schedule ────────────────────────────────────────────────────────
+// One schedule per user (1:1). `temporal_schedule_id` pins the Prisma row to
+// the matching Temporal Schedule resource — mutating one without the other
+// creates drift, so every write should go through a service that updates
+// both atomically (schedule_sync activity, Step 3).
+
+model CallSchedule {
+  id                 String   @id @default(cuid(2))
+  userId             String   @unique @map("user_id")
+  localTimeOfDay     String   @map("local_time_of_day") // "21:00"
+  enabled            Boolean  @default(true)
+  temporalScheduleId String?  @unique @map("temporal_schedule_id")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("call_schedules")
+}
+
+// ─── Call sessions ────────────────────────────────────────────────────────
+// One row per call *attempt*, not per successful call. Covers no-answer and
+// failed attempts so the journal timeline can show "we tried but couldn't
+// reach you" entries.
+
+enum CallStatus {
+  PENDING
+  DIALING
+  IN_PROGRESS
+  COMPLETED
+  NO_ANSWER
+  FAILED
+  CANCELLED
+
+  @@map("call_status")
+}
+
+model CallSession {
+  id                 String     @id @default(cuid(2))
+  userId             String     @map("user_id")
+  scheduledFor       DateTime   @map("scheduled_for")
+  status             CallStatus @default(PENDING)
+  twilioCallSid      String?    @unique @map("twilio_call_sid")
+  temporalWorkflowId String     @unique @map("temporal_workflow_id")
+  startedAt          DateTime?  @map("started_at")
+  endedAt            DateTime?  @map("ended_at")
+  durationSeconds    Int?       @map("duration_seconds")
+  recordingUrl       String?    @map("recording_url")
+  failureReason      String?    @map("failure_reason")
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transcripts  Transcript[]
+  journalEntry JournalEntry?
+
+  @@index([userId, scheduledFor(sort: Desc)])
+  @@index([status])
+  @@map("call_sessions")
+}
+
+// ─── Transcripts ──────────────────────────────────────────────────────────
+// One CallSession can have multiple Transcripts — in MVP only REALTIME from
+// Deepgram; post-Modal, a second CANONICAL row from WhisperX. The unique
+// index on (call_session_id, kind) enforces "at most one of each kind."
+
+enum TranscriptKind {
+  REALTIME
+  CANONICAL
+
+  @@map("transcript_kind")
+}
+
+enum TranscriptProvider {
+  DEEPGRAM
+  WHISPERX
+  OTHER
+
+  @@map("transcript_provider")
+}
+
+model Transcript {
+  id            String             @id @default(cuid(2))
+  callSessionId String             @map("call_session_id")
+  kind          TranscriptKind
+  provider      TranscriptProvider
+  text          String             @db.Text
+  segments      Json // [{ speaker, start_ms, end_ms, text, confidence }]
+  wordCount     Int                @map("word_count")
+  createdAt     DateTime           @default(now()) @map("created_at")
+
+  callSession CallSession @relation(fields: [callSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([callSessionId, kind])
+  @@map("transcripts")
+}
+
+// ─── Journal entries ──────────────────────────────────────────────────────
+// The product. `generated_body` keeps the raw LLM output even after user
+// edits, so we never lose what the model originally wrote. `entry_date` is
+// separate from `created_at` — the entry is about "yesterday" even if it
+// was generated at 3am today.
+
+model JournalEntry {
+  id            String   @id @default(cuid(2))
+  userId        String   @map("user_id")
+  callSessionId String?  @unique @map("call_session_id")
+  title         String
+  body          String   @db.Text
+  generatedBody String   @db.Text @map("generated_body")
+  isEdited      Boolean  @default(false) @map("is_edited")
+  entryDate     DateTime @map("entry_date") @db.Date
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  callSession CallSession? @relation(fields: [callSessionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, entryDate(sort: Desc)])
+  @@map("journal_entries")
+}

@@ -1,0 +1,240 @@
+// Quotid — architecture-as-code in LikeC4.
+// One model; Context / Container / Deployment / Dynamic views derived below.
+
+specification {
+  element person     { style { shape person } }
+  element system
+  element container
+  element webapp     { style { shape browser } }
+  element database   { style { shape storage } }
+
+  deploymentNode vm
+  deploymentNode saas
+  deploymentNode device
+
+  relationship https { technology 'HTTPS' }
+  relationship wss   { technology 'WebSocket' }
+  relationship pstn  { technology 'PSTN' }
+  relationship pg    { technology 'Postgres wire' }
+  relationship grpc  { technology 'gRPC' }
+  relationship rest  { technology 'REST' }
+}
+
+model {
+
+  user = person 'User' {
+    description 'Keeps a voice-driven journal'
+  }
+
+  quotid = system 'Quotid' {
+    description 'Voice-agent journaling. Calls the user nightly and turns the conversation into a journal entry.'
+
+    caddy = container 'Caddy' {
+      technology 'Go'
+      description "Reverse proxy + automatic TLS via Let's Encrypt"
+    }
+
+    web = webapp 'Web App' {
+      technology 'Next.js 16, TanStack Query'
+      description 'UI, Server Actions, Route Handlers (incl. Twilio status webhook)'
+    }
+
+    pipecat = container 'Pipecat Bot Server' {
+      technology 'Python, FastAPI'
+      description 'Telephony bridge. REST: /calls, /calls/{sid}/twiml. WSS: /calls/{sid}/stream. Runs the STT→LLM→TTS pipeline per call.'
+    }
+
+    worker = container 'Temporal Worker' {
+      technology 'Python'
+      description 'Activities: initiate_call, await_call, summarize, store_entry'
+    }
+
+    temporal = container 'Temporal Server' {
+      technology 'Go (start-dev)'
+      description 'Workflow orchestration engine'
+    }
+
+    tempvol = database 'Temporal State' {
+      technology 'SQLite + Docker Volume'
+      description 'Workflow history persistence'
+    }
+  }
+
+  // External systems
+  twilio = system 'Twilio' {
+    description 'PSTN + Programmable Voice + Media Streams'
+  }
+  deepgram = system 'Deepgram' {
+    description 'Real-time STT (Nova-3)'
+  }
+  openrouter = system 'OpenRouter' {
+    description 'LLM routing. Claude Haiku in-call, Sonnet post-call.'
+  }
+  cartesia = system 'Cartesia' {
+    description 'Real-time TTS (Sonic)'
+  }
+  neon = database 'Neon Postgres' {
+    description 'Managed Postgres — journal data'
+  }
+
+  // Relationships
+
+  // User-facing
+  user -[https]-> quotid.caddy 'Uses web UI'
+  twilio -[pstn]-> user 'Rings phone'
+
+  // Inside Quotid
+  quotid.caddy -> quotid.web 'Forwards web traffic' { technology 'HTTP' }
+  quotid.caddy -> quotid.pipecat 'Forwards /calls, /calls/{sid}/twiml, /calls/{sid}/stream' { technology 'HTTP / WSS' }
+
+  quotid.web -[grpc]-> quotid.temporal 'Triggers workflows, queries state'
+  quotid.web -[pg]-> neon 'CRUD via Prisma'
+
+  quotid.temporal -[grpc]-> quotid.worker 'Dispatches activity tasks'
+  quotid.temporal -> quotid.tempvol 'Persists workflow history' { technology 'SQLite' }
+
+  quotid.worker -[https]-> quotid.pipecat 'POST /calls to initiate outbound call'
+  quotid.worker -[https]-> openrouter 'Summarize transcript (Sonnet)'
+  quotid.worker -[pg]-> neon 'Write journal entry via Prisma'
+
+  quotid.pipecat -> twilio 'calls.create + Media Streams' { technology 'REST + WSS' }
+  quotid.pipecat -[wss]-> deepgram 'Stream audio for STT'
+  quotid.pipecat -[https]-> openrouter 'Per-turn LLM calls (Haiku)'
+  quotid.pipecat -[wss]-> cartesia 'TTS synthesis'
+  quotid.pipecat -[grpc]-> quotid.worker 'Async activity completion on call end'
+}
+
+// Physical layout
+deployment {
+
+  phone = device 'User Phone' {
+    description 'Any PSTN carrier'
+  }
+
+  browser = device 'User Browser' {
+    description 'Chrome / Safari / Firefox'
+  }
+
+  oracleVm = vm 'Oracle Cloud Ampere A1' {
+    description 'Always-Free, Ubuntu 22.04, 4 vCPU / 24 GB RAM. Docker Compose.'
+
+    instanceOf quotid.caddy
+    instanceOf quotid.web
+    instanceOf quotid.pipecat
+    instanceOf quotid.worker
+    instanceOf quotid.temporal
+    instanceOf quotid.tempvol
+  }
+
+  neonCloud = saas 'Neon Cloud' {
+    description 'Managed Postgres, us-east-1'
+    instanceOf neon
+  }
+
+  twilioCloud = saas 'Twilio Cloud' {
+    description 'US edge'
+    instanceOf twilio
+  }
+
+  aiProviders = saas 'AI Providers' {
+    description 'Third-party SaaS'
+    instanceOf deepgram
+    instanceOf openrouter
+    instanceOf cartesia
+  }
+}
+
+views {
+
+  // Level 1 — System Context
+  view index {
+    title 'System Context — Quotid'
+    include *
+    style user { color green }
+    style quotid { color primary }
+    autoLayout TopBottom
+  }
+
+  // Level 2 — Container diagram
+  view containers of quotid {
+    title 'Container Diagram — Quotid'
+    include *
+    autoLayout LeftRight
+  }
+
+  // Supplementary — Deployment
+  deployment view production {
+    title 'Deployment — Quotid Production'
+    include *
+    autoLayout TopBottom
+  }
+
+  // Dynamic — Nightly call flow (graph rendering)
+  dynamic view callFlow {
+    title 'Nightly Journaling Call — End-to-End'
+    description 'One call, schedule-fire → journal-write.'
+
+    quotid.temporal -> quotid.worker 'Schedule fires; starts JournalingWorkflow'
+    quotid.worker -> quotid.pipecat 'activity: initiate_call(wf_id, activity_id, phone)' { technology 'HTTPS POST /calls' }
+    quotid.pipecat -> twilio 'calls.create(to=phone, twiml_url=/twiml)' { technology 'REST' }
+    twilio -> user 'Ring' { technology 'PSTN' }
+    twilio -> quotid.pipecat 'GET /calls/{sid}/twiml returns <Connect><Stream>' { technology 'HTTPS' }
+    twilio -> quotid.pipecat 'Opens WSS /calls/{sid}/stream' { technology 'WSS, μ-law 8kHz' }
+    quotid.pipecat -> deepgram 'Stream audio → transcripts' { technology 'WSS' }
+    quotid.pipecat -> openrouter 'Per turn: transcript → Claude Haiku' { technology 'HTTPS' }
+    quotid.pipecat -> cartesia 'Stream text → PCM audio chunks' { technology 'WSS' }
+    quotid.pipecat -> twilio 'Send synthesized audio out Media Stream' { technology 'WSS' }
+    user -> twilio 'Hangs up (or bot ends)' { technology 'PSTN' }
+    quotid.pipecat -> quotid.worker 'complete_activity(wf_id, activity_id, payload)' { technology 'Temporal SDK / gRPC' }
+    quotid.worker -> openrouter 'activity: summarize(transcript) via Sonnet' { technology 'HTTPS' }
+    quotid.worker -> neon 'activity: store_entry(entry) via Prisma' { technology 'Postgres' }
+
+    autoLayout TopBottom
+  }
+
+  // Dynamic — same flow rendered as a UML sequence diagram.
+  // Shows responses and participants as lanes along a time axis.
+  dynamic view callSequence {
+    title 'Nightly Journaling Call — Sequence'
+    description 'Message-level sequence with responses, rendered as UML.'
+    variant sequence
+
+    quotid.temporal -> quotid.worker 'schedule fires: start JournalingWorkflow'
+    quotid.worker -> quotid.pipecat 'POST /calls { wf_id, activity_id, phone }'
+    quotid.worker <- quotid.pipecat '201 Created { call_sid }'
+
+    quotid.pipecat -> twilio 'REST: calls.create(to, twiml_url)'
+    quotid.pipecat <- twilio 'Call SID'
+
+    twilio -> user 'PSTN ring'
+    twilio <- user 'answered'
+
+    twilio -> quotid.pipecat 'GET /calls/{sid}/twiml'
+    twilio <- quotid.pipecat '<Connect><Stream url=wss://.../calls/{sid}/stream>'
+
+    twilio -> quotid.pipecat 'WSS open /calls/{sid}/stream'
+
+    // Per turn (abstracted — repeats ~30x during a 10-min call)
+    quotid.pipecat -> deepgram 'stream audio chunks'
+    quotid.pipecat <- deepgram 'final transcript (turn boundary)'
+    quotid.pipecat -> openrouter 'POST /chat/completions (Haiku)'
+    quotid.pipecat <- openrouter 'assistant response text'
+    quotid.pipecat -> cartesia 'synthesize(response)'
+    quotid.pipecat <- cartesia 'PCM chunks'
+    quotid.pipecat -> twilio 'outbound audio frames'
+    twilio -> user 'assistant speaks'
+
+    // Call ends
+    user -> twilio 'hangup'
+    twilio -> quotid.pipecat 'WSS close'
+    twilio -> quotid.web 'POST /api/webhooks/twilio/call-status (watchdog)'
+
+    // Post-call
+    quotid.pipecat -> quotid.temporal 'complete_activity(payload)'
+    quotid.temporal -> quotid.worker 'workflow resumes'
+    quotid.worker -> openrouter 'summarize(transcript) via Sonnet'
+    quotid.worker <- openrouter 'journal entry text'
+    quotid.worker -> neon 'INSERT journal_entry'
+    quotid.worker <- neon 'ok'
+  }
+}
