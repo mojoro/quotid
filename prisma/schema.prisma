@@ -23,7 +23,7 @@ datasource db {
 // data migration.
 
 model User {
-  id           String   @id @default(cuid(2))
+  id           String   @id @default(cuid())
   email        String   @unique
   phoneNumber  String   @unique @map("phone_number") // E.164, e.g. "+14155551234"
   timezone     String // IANA, e.g. "America/Chicago"
@@ -47,7 +47,7 @@ model User {
 // in the validator).
 
 model Session {
-  id        String   @id @default(cuid(2))
+  id        String   @id @default(cuid())
   userId    String   @map("user_id")
   // Token is the cookie value. Stored in plaintext: it's a 256-bit URL-safe
   // random string with no exploitable structure. If the DB is compromised
@@ -72,7 +72,7 @@ model Session {
 // both atomically (schedule_sync activity, Step 3).
 
 model CallSchedule {
-  id                 String   @id @default(cuid(2))
+  id                 String   @id @default(cuid())
   userId             String   @unique @map("user_id")
   localTimeOfDay     String   @map("local_time_of_day") // "21:00"
   enabled            Boolean  @default(true)
@@ -103,7 +103,7 @@ enum CallStatus {
 }
 
 model CallSession {
-  id                 String     @id @default(cuid(2))
+  id                 String     @id @default(cuid())
   userId             String     @map("user_id")
   scheduledFor       DateTime   @map("scheduled_for")
   status             CallStatus @default(PENDING)
@@ -147,7 +147,7 @@ enum TranscriptProvider {
 }
 
 model Transcript {
-  id            String             @id @default(cuid(2))
+  id            String             @id @default(cuid())
   callSessionId String             @map("call_session_id")
   kind          TranscriptKind
   provider      TranscriptProvider
@@ -169,7 +169,7 @@ model Transcript {
 // was generated at 3am today.
 
 model JournalEntry {
-  id            String   @id @default(cuid(2))
+  id            String   @id @default(cuid())
   userId        String   @map("user_id")
   callSessionId String?  @unique @map("call_session_id")
   title         String
