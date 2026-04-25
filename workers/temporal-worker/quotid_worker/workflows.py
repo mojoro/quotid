@@ -1,25 +1,131 @@
 from datetime import timedelta
+
 from temporalio import workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
-    from .activities import create_call_session
-    from .dto import (
-        CreateCallSessionInput,
-        JournalingWorkflowInput,
+    from .activities import (
+        create_call_session,
+        initiate_call,
+        await_call,
+        handle_missed_call,
+        summarize,
+        store_entry,
     )
+    from .dto import (
+        CallOutcome,
+        CallOutcomeStatus,
+        CreateCallSessionInput,
+        InitiateCallInput,
+        JournalingWorkflowInput,
+        StoreEntryInput,
+        SummarizeInput,
+        SummarizeResult,
+    )
+
+
+_DEFAULT_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30),
+    maximum_attempts=3,
+)
+
+_INITIATE_CALL_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=10),
+    maximum_attempts=3,
+    non_retryable_error_types=["TwilioClientError"],
+)
+
+_SUMMARIZE_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=10),
+    backoff_coefficient=1.0,
+    maximum_interval=timedelta(seconds=10),
+    maximum_attempts=2,
+)
 
 
 @workflow.defn(name="JournalingWorkflow")
 class JournalingWorkflow:
     @workflow.run
-    async def run(self, inp: JournalingWorkflowInput) -> str:
-        result = await workflow.execute_activity(
+    async def run(self, inp: JournalingWorkflowInput) -> str | None:
+        wf_id = workflow.info().workflow_id
+
+        session = await workflow.execute_activity(
             create_call_session,
             CreateCallSessionInput(
                 user_id=inp.user_id,
                 scheduled_for=inp.scheduled_for,
-                workflow_id=workflow.info().workflow_id,
+                workflow_id=wf_id,
             ),
             start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=_DEFAULT_RETRY,
         )
-        return result.call_session_id
+
+        await workflow.execute_activity(
+            initiate_call,
+            InitiateCallInput(
+                call_session_id=session.call_session_id,
+                workflow_id=wf_id,
+                activity_id="await-call",
+                to_phone=session.phone_number,
+            ),
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=_INITIATE_CALL_RETRY,
+        )
+
+        try:
+            outcome: CallOutcome = await workflow.execute_activity(
+                await_call,
+                session.call_session_id,
+                activity_id="await-call",
+                start_to_close_timeout=timedelta(minutes=20),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except ActivityError as e:
+            outcome = CallOutcome(
+                status=CallOutcomeStatus.FAILED,
+                call_session_id=session.call_session_id,
+                twilio_call_sid="",
+                failure_reason=f"await_call backstop: {type(e).__name__}",
+            )
+
+        if outcome.status != CallOutcomeStatus.COMPLETED:
+            await workflow.execute_activity(
+                handle_missed_call,
+                StoreEntryInput(
+                    user_id=inp.user_id,
+                    call_session_id=session.call_session_id,
+                    outcome=outcome,
+                    summary=None,
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=_DEFAULT_RETRY,
+            )
+            return None
+
+        summary: SummarizeResult = await workflow.execute_activity(
+            summarize,
+            SummarizeInput(
+                transcript_text=outcome.transcript_text or "",
+                user_timezone="UTC",
+                entry_date=inp.scheduled_for.date().isoformat(),
+            ),
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=_SUMMARIZE_RETRY,
+        )
+
+        return await workflow.execute_activity(
+            store_entry,
+            StoreEntryInput(
+                user_id=inp.user_id,
+                call_session_id=session.call_session_id,
+                outcome=outcome,
+                summary=summary,
+            ),
+            start_to_close_timeout=timedelta(seconds=15),
+            retry_policy=_DEFAULT_RETRY,
+        )
