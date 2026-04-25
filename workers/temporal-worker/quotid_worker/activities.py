@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import date
+from datetime import datetime, time, timezone
 
 import httpx
 from temporalio import activity
@@ -149,6 +149,9 @@ async def store_entry(inp: StoreEntryInput) -> str:
     await prisma.callsession.update(where={"id": inp.outcome.call_session_id}, data=cs_data)
 
     if inp.outcome.transcript_text:
+        from prisma import Json
+
+        segments_json = Json(inp.outcome.transcript_segments or [])
         await prisma.transcript.upsert(
             where={
                 "callSessionId_kind": {
@@ -158,16 +161,16 @@ async def store_entry(inp: StoreEntryInput) -> str:
             },
             data={
                 "create": {
-                    "callSessionId": inp.outcome.call_session_id,
+                    "callSession": {"connect": {"id": inp.outcome.call_session_id}},
                     "kind": "REALTIME",
                     "provider": "DEEPGRAM",
                     "text": inp.outcome.transcript_text,
-                    "segments": inp.outcome.transcript_segments or [],
+                    "segments": segments_json,
                     "wordCount": len(inp.outcome.transcript_text.split()),
                 },
                 "update": {
                     "text": inp.outcome.transcript_text,
-                    "segments": inp.outcome.transcript_segments or [],
+                    "segments": segments_json,
                     "wordCount": len(inp.outcome.transcript_text.split()),
                 },
             },
@@ -184,7 +187,7 @@ async def store_entry(inp: StoreEntryInput) -> str:
             "body": inp.summary.body,
             "generatedBody": inp.summary.body,
             "isEdited": False,
-            "entryDate": date.today(),
+            "entryDate": datetime.combine(datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc),
         }
     )
     return entry.id
