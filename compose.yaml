@@ -1,0 +1,77 @@
+name: quotid
+
+networks:
+  quotid:
+    driver: bridge
+
+volumes:
+  temporal-data:
+  caddy-data:
+  caddy-config:
+
+services:
+  temporal:
+    image: temporalio/admin-tools:latest
+    command: ["temporal", "server", "start-dev", "--ip", "0.0.0.0", "--ui-port", "8233"]
+    networks: [quotid]
+    volumes:
+      - temporal-data:/etc/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "namespace", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: workers/temporal-worker/Dockerfile
+    env_file: .env
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      BOT_INTERNAL_URL: http://bot:8000
+    networks: [quotid]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: apps/pipecat-bot/Dockerfile
+    env_file: .env
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    networks: [quotid]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    env_file: .env
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    networks: [quotid]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [quotid]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [web, bot]
+    restart: unless-stopped
