@@ -379,9 +379,11 @@ class JournalingWorkflow:
 
 One **Temporal Schedule** per `CallSchedule` row. Owned by a service method, not by the workflow itself.
 
+**Where it lives:** the `updateCallSchedule` Server Action runs in Next.js's Node.js runtime (TypeScript), so the actual implementation uses **`@temporalio/client` (TypeScript)**, not the Python SDK. The Python pseudocode below is presented for type-clarity continuity with the rest of this doc — names, arguments, and ordering map 1:1 to the TS implementation in `app/actions/call-schedule.ts`. Python types like `ScheduleSpec`, `ScheduleCalendarSpec`, `ScheduleActionStartWorkflow` correspond to TS classes of the same name in `@temporalio/client`. The same SDK is used by `/api/webhooks/twilio/call-status` to async-complete the `await-call` activity (§5).
+
 ```python
-# schedule_service.py — called from the Next.js server action `updateCallSchedule`
-# via the Temporal Python SDK. Encapsulates "DB + Temporal atomic write".
+# Pseudocode. Actual code: app/actions/call-schedule.ts (TypeScript / @temporalio/client).
+# Encapsulates "DB + Temporal atomic write".
 
 async def upsert_call_schedule(
     user_id: str,
