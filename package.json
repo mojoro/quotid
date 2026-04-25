@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "prisma": "^6.0.0",
+    "prisma-client-python": "^0.2.1",
     "tsx": "^4.0.0",
     "turbo": "^2.0.0",
     "typescript": "^5.5.0"
