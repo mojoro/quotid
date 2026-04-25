@@ -34,3 +34,23 @@ Thumbs.db
 
 # likec4 preview cache
 .likec4/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Turborepo
+.turbo
+
+# Next.js
+.next
+out
+
+# uv
+.venv
+__pycache__
+*.pyc
+
+# Vitest
+coverage
