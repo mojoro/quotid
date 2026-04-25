@@ -7,11 +7,10 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 COPY workers/temporal-worker/pyproject.toml workers/temporal-worker/uv.lock /app/
+COPY workers/temporal-worker/quotid_worker /app/quotid_worker
 COPY prisma /app/prisma
 RUN ln -sf /app/prisma/schema.prisma /app/schema.prisma
 RUN uv sync --frozen --no-dev
 RUN uv run prisma generate
-
-COPY workers/temporal-worker/quotid_worker /app/quotid_worker
 
 CMD ["uv", "run", "python", "-m", "quotid_worker.main"]
