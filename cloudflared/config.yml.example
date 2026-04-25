@@ -1,0 +1,9 @@
+tunnel: quotid-bot
+credentials-file: /home/john/.cloudflared/<tunnel-uuid>.json
+
+ingress:
+  - hostname: bot.YOUR_DOMAIN.com
+    service: http://localhost:8000
+  - hostname: app.YOUR_DOMAIN.com
+    service: http://localhost:3000
+  - service: http_status:404
