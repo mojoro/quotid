@@ -28,8 +28,8 @@ Each inbound WebSocket connection on `WSS /calls/{call_sid}/stream` spins up **o
 | `pipecat.transports.websocket.fastapi` | `FastAPIWebsocketTransport`, `FastAPIWebsocketParams` | Twilio-side I/O. |
 | `pipecat.serializers.twilio` | `TwilioFrameSerializer` | Encodes/decodes Twilio Media Streams frames. |
 | `pipecat.services.deepgram.stt` | `DeepgramSTTService` | Streaming STT (Nova-3). |
-| `pipecat.services.openai` | `OpenAILLMService` | LLM — pointed at OpenRouter via custom `base_url`. |
-| `pipecat.services.cartesia.tts` | `CartesiaTTSService` | Streaming TTS (Sonic). |
+| `pipecat.services.openai.llm` | `OpenAILLMService` | LLM — pointed at OpenRouter via custom `base_url`. |
+| `pipecat.services.deepgram.tts` | `DeepgramTTSService` | Streaming TTS (Aura). |
 | `pipecat.audio.vad.silero` | `SileroVADAnalyzer` | Voice activity detection. |
 | `pipecat.audio.vad.vad_analyzer` | `VADParams` | VAD tuning. |
 | `pipecat.audio.turn.smart_turn.local_smart_turn_v3` | `LocalSmartTurnAnalyzerV3` | ML-based end-of-turn detector. |
@@ -116,8 +116,8 @@ They share state via an in-process registry keyed by `call_sid`: `{call_sid -> {
                 │ TextFrame (streaming)
                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ CartesiaTTSService                                              │
-│   · streams incoming text → synthesized PCM audio               │
+│ DeepgramTTSService                                              │
+│   · streams incoming text → synthesized PCM audio (Aura)        │
 │   · emits AudioRawFrame                                         │
 └───────────────┬─────────────────────────────────────────────────┘
                 │ AudioRawFrame
@@ -156,9 +156,9 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.serializers.twilio import TwilioFrameSerializer
-from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai import OpenAILLMService
+from pipecat.services.deepgram.tts import DeepgramTTSService
+from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams, FastAPIWebsocketTransport,
 )
@@ -167,7 +167,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from .correlation import pop_correlation          # {call_sid -> (wf_id, act_id, cs_id)}
 from .completion import complete_await_call       # Temporal async-completion helper
-from .tts import QuotidCartesiaTTSService         # see §7 — thin subclass for swap seam
+from .tts import QuotidDeepgramTTSService          # see §7 — thin subclass for swap seam
 from .prompts import SYSTEM_PROMPT
 
 
@@ -221,10 +221,10 @@ async def run_bot(websocket: WebSocket, stream_sid: str, call_sid: str) -> None:
         ),
     )
 
-    tts = QuotidCartesiaTTSService(        # see §7
-        api_key=os.environ["CARTESIA_API_KEY"],
-        settings=CartesiaTTSService.Settings(
-            voice=os.environ["CARTESIA_VOICE_ID"],
+    tts = QuotidDeepgramTTSService(        # see §7
+        api_key=os.environ["DEEPGRAM_API_KEY"],
+        settings=DeepgramTTSService.Settings(
+            voice=os.environ["DEEPGRAM_VOICE"],   # e.g. "aura-2-andromeda-en"
         ),
     )
 
@@ -274,6 +274,13 @@ async def run_bot(websocket: WebSocket, stream_sid: str, call_sid: str) -> None:
         ),
     )
 
+    # CRITICAL: register disconnect handler before runner.run().
+    # Without this, runner.run() hangs indefinitely after the WSS closes
+    # because the PipelineTask never receives a cancellation signal.
+    @transport.event_handler("on_client_disconnected")
+    async def on_disconnect(_t, _client):
+        await task.cancel()
+
     # ── Run ─────────────────────────────────────────────────────────────
     runner = PipelineRunner(handle_sigint=False)   # FastAPI owns signal handling
     try:
@@ -303,11 +310,11 @@ Per decision #11:
 | Twilio ↔ Pipecat WSS | μ-law encoded | 8 kHz | `TwilioFrameSerializer` (transparent) |
 | Pipeline internal | Linear PCM (16-bit signed) | 8 kHz | Pipecat default once serializer decodes |
 | Deepgram streaming input | Linear PCM | 8 kHz (passed through) | Deepgram handles upsampling internally if needed |
-| Cartesia streaming output | Linear PCM | 8 kHz (we request) | Set via `CartesiaTTSService.Settings` if needed to match |
+| Deepgram TTS streaming output | Linear PCM | 8 kHz (we request) | Set via `DeepgramTTSService.Settings` if needed to match |
 
 `PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000)` tells Pipecat the wire format expected by the transport. The STT and TTS services adapt to the pipeline's PCM stream; they don't know or care about Twilio.
 
-**What we give up by staying at 8 kHz:** a bit of TTS fidelity — Cartesia Sonic sounds better at 24 kHz. But telephony codecs downsample anyway; any extra bandwidth is discarded before the user hears it. 8 kHz end-to-end avoids one resampling step and ~10–20 ms of CPU-bound latency.
+**What we give up by staying at 8 kHz:** a bit of TTS fidelity — Deepgram Aura sounds better at higher sample rates. But telephony codecs downsample anyway; any extra bandwidth is discarded before the user hears it. 8 kHz end-to-end avoids one resampling step and ~10–20 ms of CPU-bound latency.
 
 ## 6. Turn detection
 
@@ -330,29 +337,29 @@ Per decision #7: "Pipecat's `TTSService` base class is sufficient for hosted-to-
 
 ```
 pipecat.services.tts.TTSService         (Pipecat abstract base)
-└── pipecat.services.cartesia.tts.CartesiaTTSService   (Pipecat built-in)
-    └── apps.pipecat-bot.src.tts.QuotidCartesiaTTSService   (our MVP subclass)
+└── pipecat.services.deepgram.tts.DeepgramTTSService   (Pipecat built-in)
+    └── apps.pipecat-bot.src.tts.QuotidDeepgramTTSService   (our MVP subclass)
 
 pipecat.services.tts.TTSService
 └── apps.pipecat-bot.src.tts.ModalTTSService   (FUTURE — swap target)
 ```
 
-`QuotidCartesiaTTSService` is a thin subclass adding only what the MVP actually needs on top of Cartesia:
+`QuotidDeepgramTTSService` is a thin subclass adding only what the MVP actually needs on top of Deepgram:
 
 ```python
 # apps/pipecat-bot/src/tts.py
 
-from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.deepgram.tts import DeepgramTTSService
 
 
-class QuotidCartesiaTTSService(CartesiaTTSService):
+class QuotidDeepgramTTSService(DeepgramTTSService):
     """
     MVP TTS. Subclassed (not wrapped) per decision #7 so the future
     `ModalTTSService` can slot in by swapping the pipeline constructor's
     `tts = ...` line — nothing else in the pipeline knows which
     implementation it is.
 
-    The class exists (rather than using CartesiaTTSService directly) so we
+    The class exists (rather than using DeepgramTTSService directly) so we
     have a single place to add Quotid-specific concerns: custom error
     handling, latency metrics tagging, or voice-switching by user
     preference. Empty body is fine for MVP.
@@ -364,15 +371,14 @@ class QuotidCartesiaTTSService(CartesiaTTSService):
 - Wrapping would require our class to implement the full `TTSService` interface and forward every method — fragile, high maintenance.
 - Subclassing inherits the full interface, override only what changes.
 - The pipeline constructor references our class name once; swapping to `ModalTTSService` is a one-line change at the call site.
-- Both `QuotidCartesiaTTSService` and a future `ModalTTSService` extend `TTSService` (not each other) — they're siblings, not a deepening chain. Keeps the swap clean.
+- Both `QuotidDeepgramTTSService` and a future `ModalTTSService` extend `TTSService` (not each other) — they're siblings, not a deepening chain. Keeps the swap clean.
 
 **`ModalTTSService` sketch (future, not implemented):**
 
 ```python
 class ModalTTSService(TTSService):
     """
-    FUTURE. Runs TTS on a Modal-hosted model (e.g., Orpheus TTS or a
-    fine-tuned Cartesia-compatible model) for cost control.
+    FUTURE. Runs TTS on a Modal-hosted model (e.g., Orpheus TTS) for cost control.
 
     Implements the same async generator contract as other TTSService
     subclasses: accepts text frames, emits AudioRawFrame batches.
@@ -497,14 +503,14 @@ Target from decision #12: **1.0–1.5 s voice-to-voice** (end of user turn to fi
 | SmartTurn inference (**estimated**) | 100 ms | 200 ms | Local ONNX classifier on CPU. Pipecat docs claim "fast CPU inference" without a specific number; estimate based on typical small classifier sizes. Measure during impl. |
 | Deepgram streaming final transcript | 150 ms | 400 ms | After audio end |
 | **LLM (Haiku) first-token latency** | 300 ms | 700 ms | OpenRouter → Anthropic route |
-| Cartesia first-audio-chunk | 100 ms | 250 ms | Streaming start |
+| Deepgram TTS first-audio-chunk | 100 ms | 250 ms | Streaming start |
 | Our VM → Twilio → PSTN (one-way) | 50 ms | 150 ms | |
 | **Total voice-to-voice** | **~980 ms** | **~2130 ms** | Typical hits target; worst-case overshoots |
 
 **Where we can cut if tail latency is bad:**
 - Prompt caching (decision #8 mentions it works through OpenRouter) — caches the system prompt on Anthropic's side, saving ~100 ms on each turn after the first.
 - Shorter `stop_secs` on VAD (down to 0.1 s) — aggressive, may increase false turn-ends.
-- Move TTS to Modal with a warmed model instance (future — decision #7's payoff).
+- Move TTS to Modal with a warmed model instance (future — decision #7's payoff; would replace Deepgram with a self-hosted model).
 
 ## 12. Error handling
 
@@ -512,14 +518,14 @@ Target from decision #12: **1.0–1.5 s voice-to-voice** (end of user turn to fi
 |---|---|---|
 | Deepgram WSS drops | Pipeline error frame | Pipecat retries connection up to 3×; on permanent failure, pipeline ends with error, Temporal activity completed with `CallOutcome(status=FAILED, failure_reason="stt_unavailable")`. |
 | OpenRouter 5xx | Exception in `OpenAILLMService` | Pipecat surfaces as `ErrorFrame`; pipeline ends. Same FAILED outcome. |
-| Cartesia WSS drops | Pipeline error frame | Pipecat auto-reconnects TTS; if it can't, pipeline ends. Same FAILED outcome. |
+| Deepgram TTS WSS drops | Pipeline error frame | Pipecat auto-reconnects TTS; if it can't, pipeline ends. Same FAILED outcome. |
 | Twilio WSS close (user hangup) | Normal pipeline end | `CallOutcome(status=COMPLETED, ...)` with transcript. |
 | Bot hangs (SmartTurn loop, etc.) | Temporal `await_call` 20-min `start_to_close_timeout` | Workflow degrades to FAILED branch (temporal-workflow.md §3.2 backstop). |
 | Pipecat server crash | Twilio `statusCallback` → Next.js webhook → watchdog (temporal-workflow.md §5) | Webhook async-completes the activity with FAILED. |
 
 ## 13. Open questions (defer until implementation)
 
-1. **Cartesia voice selection.** One voice across all users MVP; configurable per-user in a later iteration. Env var `CARTESIA_VOICE_ID` for now.
+1. **Deepgram voice selection.** One voice across all users MVP; configurable per-user in a later iteration. Env var `DEEPGRAM_VOICE` for now (e.g. `aura-2-andromeda-en`).
 2. **System prompt content.** Storyworthy-style journaling conversation is the direction; actual wording is a prompt-engineering task post-scaffold.
 3. **Conversation-end detection.** How does the bot decide it's done? Options: (a) LLM returns a specific tool/function call indicating "wrap up", (b) fixed duration (e.g., end after 10 min), (c) user-signalled ("I'm done"). MVP probably uses (c) + (b) as hard cap. Needs user input during implementation.
 4. **Barge-in during bot opening line.** Should the user be able to interrupt the bot's greeting? `allow_interruptions=True` says yes by default; may want to disable for the first ~3 seconds so the greeting actually completes.
