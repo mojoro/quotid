@@ -105,3 +105,4 @@ Security schemes declared in both OpenAPI specs under `components.securityScheme
 | Date | Change |
 |---|---|
 | 2026-04-24 | Initial contract (Step 4). |
+| 2026-04-25 | Added `POST /auth/login` and `POST /auth/logout` to `nextjs.openapi.yaml` (closes Step 4 known gap). Passcode-on-User, argon2id, 30-day session cookie, IP rate limit on login. |
