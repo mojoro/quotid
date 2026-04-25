@@ -1,10 +1,7 @@
 import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
 import { hash } from "@node-rs/argon2";
 
-// Prisma v7 requires an explicit driver adapter; PrismaPg reads DATABASE_URL by default.
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
+const prisma = new PrismaClient();
 
 async function main() {
   const passcodeHash = await hash(process.env.SEED_PASSCODE ?? "letmein", {
