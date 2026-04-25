@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db";
 import { SESSION_COOKIE, findValidSession } from "@/lib/auth";
 
 const PUBLIC_PATHS = new Set<string>(["/login"]);
-const PUBLIC_PREFIXES = ["/api/auth/", "/_next", "/favicon"];
+const PUBLIC_PREFIXES = ["/api/auth/", "/api/webhooks/", "/_next", "/favicon"];
 
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -26,7 +26,9 @@ export async function proxy(req: NextRequest) {
 }
 
 function loginRedirect(req: NextRequest) {
-  const url = new URL("/login", req.url);
+  const proto = req.headers.get("x-forwarded-proto") ?? new URL(req.url).protocol.replace(":", "");
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? new URL(req.url).host;
+  const url = new URL("/login", `${proto}://${host}`);
   if (req.nextUrl.pathname !== "/") {
     url.searchParams.set("next", req.nextUrl.pathname + req.nextUrl.search);
   }
