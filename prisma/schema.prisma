@@ -5,19 +5,9 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// Renders an ERD into docs/architecture/erd.md on every `prisma generate`.
-// Mermaid inside Markdown → GitHub renders it inline.
-generator erd {
-  provider                  = "prisma-erd-generator"
-  output                    = "../docs/architecture/erd.md"
-  theme                     = "forest"
-  includeRelationFromFields = true
-}
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL") // Neon pooled connection (pgBouncer) — used by the app at runtime
-  directUrl = env("DIRECT_URL") // Neon direct connection — used by `prisma migrate` (pooler can't run DDL)
+  provider = "postgresql"
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────
