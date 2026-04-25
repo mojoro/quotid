@@ -93,6 +93,7 @@ Not in the OpenAPI spec because OpenAPI doesn't model async protocols. Documente
 | Pipecat `GET /calls/{sid}/twiml` | Twilio signature verification | `X-Twilio-Signature` header validated against the request body + URL. |
 | Pipecat `WSS /calls/{sid}/stream` | Twilio signature on the HTTP upgrade request | Same validation as the REST endpoints; verified before the WS is accepted. |
 | Next.js `POST /api/webhooks/twilio/call-status` | Twilio signature verification | Same as TwiML endpoint; uses TypeScript Twilio SDK's `validateRequest`. |
+| Next.js `POST /api/auth/login` | None (entry point) | Verifies passcode via argon2id; issues `quotid_session` cookie. Rate-limited 5/15min/IP. |
 | Next.js `GET /api/journal-entries*`, `/api/call-schedules` | Session cookie → passcode on User | MVP single-user: one passcode, validated by middleware, session cookie issued post-login. |
 | Server Actions | Same session cookie (via `cookies()` in Next.js) | Per-action permission check; no endpoint-level auth. |
 

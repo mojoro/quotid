@@ -42,6 +42,68 @@ tags:
     description: Inbound webhooks from external services.
 
 paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange a passcode for a session cookie.
+      description: |
+        Single-user MVP. The `User` table carries a `passcode_hash` column
+        (argon2id, see `prisma/schema.prisma`). The handler:
+
+        1. Looks up the sole user row (MVP single-user assumption — the
+           query is `SELECT 1 FROM users LIMIT 1`; the user is the
+           passcode-bearer).
+        2. Verifies the submitted passcode against `passcode_hash`.
+        3. On match: generates a 32-byte URL-safe random session token,
+           inserts a `Session` row keyed by that token (TTL 30 days,
+           sliding-window refreshed on use), sets the `quotid_session`
+           cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`,
+           `Max-Age=2592000`).
+        4. Returns 204 No Content. The client follows up with a redirect
+           to `/` (the journal list) — performed client-side by the form
+           submission handler, not by this endpoint.
+
+        **Rate limiting:** 5 attempts per IP per 15 minutes (in-process
+        token bucket; sufficient for single-user MVP). On exhaustion the
+        endpoint returns `429` with `Retry-After`. Argon2id verification
+        cost (~100 ms) is the primary brute-force defense; the rate limit
+        protects against argon2 DoS, not credential stuffing.
+
+        **Public.** No `security` requirement. This is the entry point.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '204':
+          description: |
+            Session established. `Set-Cookie: quotid_session=...` is set on
+            this response. Body is empty.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: 'quotid_session=abc123...; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000'
+        '401':
+          description: Passcode does not match.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '429':
+          description: Too many failed attempts.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                description: Seconds to wait before retrying.
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+
   /journal-entries:
     get:
       tags: [journal-entries]
@@ -222,6 +284,20 @@ components:
           schema: { $ref: '#/components/schemas/ProblemDetails' }
 
   schemas:
+    LoginRequest:
+      type: object
+      required: [passcode]
+      additionalProperties: false
+      properties:
+        passcode:
+          type: string
+          minLength: 6
+          maxLength: 128
+          description: |
+            Pre-shared passcode. Verified server-side against the user's
+            `passcode_hash` (argon2id). Length bounds prevent zero-length
+            and pathological-length inputs from reaching the verifier.
+
     JournalEntry:
       type: object
       required:
