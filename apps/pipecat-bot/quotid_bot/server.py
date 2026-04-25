@@ -75,9 +75,13 @@ async def twiml(
     x_twilio_signature: str | None = Header(default=None),
 ) -> PlainTextResponse:
     form = dict((await request.form()) if request.method == "POST" else {})
-    full_url = f"{CONFIG.bot_public_url}/calls/{call_session_id}/twiml"
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    full_url = f"{proto}://{host}{request.url.path}"
+    if request.url.query:
+        full_url += f"?{request.url.query}"
     if not verify(full_url, form, x_twilio_signature):
-        logger.warning(f"Invalid Twilio signature on /twiml for {call_session_id}")
+        logger.warning(f"Invalid Twilio signature on /twiml for {call_session_id} (url={full_url})")
         raise HTTPException(status_code=403)
 
     stream_url = (
@@ -97,26 +101,45 @@ async def twiml(
 
 @app.websocket("/calls/{call_session_id}/stream")
 async def stream(websocket: WebSocket, call_session_id: str) -> None:
-    await websocket.accept(subprotocol="audio.twilio.com")
+    await websocket.accept()
+    logger.info(f"WSS opened for call_session_id={call_session_id}")
+
+    async def safe_close(code: int) -> None:
+        try:
+            await websocket.close(code=code)
+        except Exception:
+            pass
 
     start_msg = None
-    async for raw in websocket.iter_text():
-        msg = json.loads(raw)
-        if msg.get("event") == "start":
-            start_msg = msg
-            break
+    try:
+        async for raw in websocket.iter_text():
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(f"WSS got non-JSON frame: {raw[:120]}")
+                continue
+            event = msg.get("event")
+            logger.info(f"WSS event: {event}")
+            if event == "start":
+                start_msg = msg
+                break
+    except WebSocketDisconnect:
+        logger.info(f"WSS disconnected before start for call_session_id={call_session_id}")
+        return
 
     if start_msg is None:
-        await websocket.close(code=1011)
+        logger.warning(f"WSS closed before start event for call_session_id={call_session_id}")
+        await safe_close(1011)
         return
 
     stream_sid = start_msg["start"]["streamSid"]
     call_sid = start_msg["start"]["callSid"]
+    logger.info(f"WSS start: stream_sid={stream_sid} call_sid={call_sid}")
 
     corr = lookup(call_sid)
     if corr is None:
         logger.error(f"No correlation for callSid {call_sid}; closing")
-        await websocket.close(code=1011)
+        await safe_close(1011)
         return
 
     task, accumulator, _context = build_pipeline(websocket, stream_sid, call_sid)
@@ -125,21 +148,24 @@ async def stream(websocket: WebSocket, call_session_id: str) -> None:
 
     try:
         await runner.run(task)
-    except WebSocketDisconnect:
-        logger.info(f"WSS disconnected for callSid {call_sid}")
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        logger.info(f"WSS disconnected/cancelled for callSid {call_sid}")
     except Exception:
         logger.exception(f"Pipeline error for callSid {call_sid}")
         await fail_await_call(corr.workflow_id, "pipeline_error")
         remove(call_sid)
         return
 
+    logger.info(f"Building outcome for callSid {call_sid}")
     payload = await accumulator.build_outcome(
         call_session_id=corr.call_session_id,
         twilio_call_sid=call_sid,
         twilio_client=twilio,
     )
+    logger.info(f"Completing await_call for workflow {corr.workflow_id}")
     await complete_await_call(corr.workflow_id, payload)
     remove(call_sid)
+    logger.info(f"Call session {corr.call_session_id} finalized")
 
 
 def run() -> None:
