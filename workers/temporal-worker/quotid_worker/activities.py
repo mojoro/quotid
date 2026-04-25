@@ -1,7 +1,24 @@
-from temporalio import activity
+import json
+import os
+from datetime import date
 
+import httpx
+from temporalio import activity
+from temporalio.exceptions import ApplicationError
+
+from .config import CONFIG
 from .db import prisma
-from .dto import CreateCallSessionInput, CreateCallSessionResult
+from .dto import (
+    CallOutcome,
+    CallOutcomeStatus,
+    CreateCallSessionInput,
+    CreateCallSessionResult,
+    InitiateCallInput,
+    InitiateCallResult,
+    StoreEntryInput,
+    SummarizeInput,
+    SummarizeResult,
+)
 
 
 @activity.defn
@@ -26,3 +43,30 @@ async def create_call_session(inp: CreateCallSessionInput) -> CreateCallSessionR
         phone_number=user.phoneNumber,
         user_timezone=user.timezone,
     )
+
+
+@activity.defn
+async def initiate_call(inp: InitiateCallInput) -> InitiateCallResult:
+    """Asks the Pipecat bot to place the call via its INTERNAL URL."""
+    payload = {
+        "workflow_id": inp.workflow_id,
+        "activity_id": inp.activity_id,
+        "call_session_id": inp.call_session_id,
+        "phone_number": inp.to_phone,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(f"{CONFIG.bot_internal_url}/calls", json=payload)
+        if r.status_code in (400, 401, 403, 404):
+            raise ApplicationError(
+                f"bot rejected /calls: {r.status_code} {r.text}",
+                type="TwilioClientError",
+                non_retryable=True,
+            )
+        r.raise_for_status()
+        sid = r.json()["twilio_call_sid"]
+
+    await prisma.callsession.update(
+        where={"id": inp.call_session_id},
+        data={"twilioCallSid": sid, "status": "DIALING"},
+    )
+    return InitiateCallResult(twilio_call_sid=sid)

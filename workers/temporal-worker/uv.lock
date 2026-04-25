@@ -399,6 +399,7 @@ name = "quotid-worker"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "prisma" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -415,6 +416,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "prisma", specifier = ">=0.15" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "python-dotenv", specifier = ">=1.0" },
