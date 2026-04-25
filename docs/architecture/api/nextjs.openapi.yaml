@@ -104,6 +104,39 @@ paths:
         default:
           $ref: '#/components/responses/ProblemResponse'
 
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Invalidate the current session and clear the cookie.
+      description: |
+        Idempotent. Even without a valid session cookie, the response is
+        204 with `Set-Cookie` clearing `quotid_session`. The handler:
+
+        1. Reads `quotid_session` from the request cookies.
+        2. If present, deletes the matching `Session` row (no-op if the
+           row was already expired and pruned).
+        3. Sets `Set-Cookie: quotid_session=; Max-Age=0; Path=/` to clear
+           the cookie regardless of whether step 2 found a row.
+
+        No CSRF token required: logout is idempotent and the worst-case
+        outcome of a CSRF-triggered logout is the user signing back in.
+      operationId: logout
+      security:
+        - sessionCookie: []
+        - {}
+      responses:
+        '204':
+          description: |
+            Session cleared. `Set-Cookie: quotid_session=; Max-Age=0` is
+            set on the response.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: 'quotid_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0'
+        default:
+          $ref: '#/components/responses/ProblemResponse'
+
   /journal-entries:
     get:
       tags: [journal-entries]
