@@ -131,3 +131,60 @@ async def summarize(inp: SummarizeInput) -> SummarizeResult:
         title=parsed.get("title", "Untitled"),
         body=parsed.get("body", ""),
     )
+
+
+@activity.defn
+async def store_entry(inp: StoreEntryInput) -> str:
+    """Persist transcript + journal entry; finalize CallSession."""
+    cs_data: dict = {
+        "status": "COMPLETED",
+        "twilioCallSid": inp.outcome.twilio_call_sid,
+        "startedAt": inp.outcome.started_at,
+        "endedAt": inp.outcome.ended_at,
+        "durationSeconds": inp.outcome.duration_seconds,
+    }
+    if inp.outcome.recording_url is not None:
+        cs_data["recordingUrl"] = inp.outcome.recording_url
+
+    await prisma.callsession.update(where={"id": inp.outcome.call_session_id}, data=cs_data)
+
+    if inp.outcome.transcript_text:
+        await prisma.transcript.upsert(
+            where={
+                "callSessionId_kind": {
+                    "callSessionId": inp.outcome.call_session_id,
+                    "kind": "REALTIME",
+                }
+            },
+            data={
+                "create": {
+                    "callSessionId": inp.outcome.call_session_id,
+                    "kind": "REALTIME",
+                    "provider": "DEEPGRAM",
+                    "text": inp.outcome.transcript_text,
+                    "segments": inp.outcome.transcript_segments or [],
+                    "wordCount": len(inp.outcome.transcript_text.split()),
+                },
+                "update": {
+                    "text": inp.outcome.transcript_text,
+                    "segments": inp.outcome.transcript_segments or [],
+                    "wordCount": len(inp.outcome.transcript_text.split()),
+                },
+            },
+        )
+
+    if inp.summary is None:
+        return ""
+
+    entry = await prisma.journalentry.create(
+        data={
+            "userId": inp.user_id,
+            "callSessionId": inp.outcome.call_session_id,
+            "title": inp.summary.title,
+            "body": inp.summary.body,
+            "generatedBody": inp.summary.body,
+            "isEdited": False,
+            "entryDate": date.today(),
+        }
+    )
+    return entry.id
