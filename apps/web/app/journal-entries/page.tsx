@@ -2,6 +2,7 @@ import { dehydrate, HydrationBoundary, QueryClient } from "@tanstack/react-query
 import { prisma } from "@/lib/db";
 import { currentUserId } from "@/lib/auth";
 import { JournalList } from "./journal-list.client";
+import { TriggerCallButton } from "./trigger-call-button.client";
 
 export default async function JournalEntriesPage() {
   const userId = await currentUserId();
@@ -33,6 +34,7 @@ export default async function JournalEntriesPage() {
           <button className="text-sm text-zinc-500 hover:text-zinc-900">Sign out</button>
         </form>
       </header>
+      <TriggerCallButton />
       <HydrationBoundary state={dehydrate(queryClient)}>
         <JournalList />
       </HydrationBoundary>
