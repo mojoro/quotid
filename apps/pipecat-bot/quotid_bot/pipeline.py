@@ -10,7 +10,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.serializers.twilio import TwilioFrameSerializer
-from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
@@ -25,7 +25,7 @@ from .system_prompt import OPENING_LINE, SYSTEM_PROMPT
 from .transcript_accumulator import TranscriptAccumulator
 
 
-class QuotidCartesiaTTSService(CartesiaTTSService):
+class QuotidDeepgramTTSService(DeepgramTTSService):
     """Empty subclass — swap point for future ModalTTSService (decision #11)."""
 
 
@@ -58,9 +58,9 @@ def build_pipeline(
         model="anthropic/claude-haiku-4-5",
     )
 
-    tts = QuotidCartesiaTTSService(
-        api_key=CONFIG.cartesia_api_key,
-        voice_id=CONFIG.cartesia_voice_id,
+    tts = QuotidDeepgramTTSService(
+        api_key=CONFIG.deepgram_api_key,
+        voice="aura-2-thalia-en",  # Aura 2 default; change via env if needed
     )
 
     context = LLMContext(messages=[{"role": "system", "content": SYSTEM_PROMPT}])
