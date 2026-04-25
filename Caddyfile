@@ -1,0 +1,21 @@
+# Quotid reverse proxy + auto-TLS via Let's Encrypt.
+# Replace YOUR_DOMAIN.com with your actual domain before deploying.
+
+app.YOUR_DOMAIN.com {
+  encode gzip
+  reverse_proxy web:3000
+}
+
+bot.YOUR_DOMAIN.com {
+  encode gzip
+
+  # Pipecat's POST /calls is internal-only — block public access (decision #14).
+  @internal_call_create {
+    method POST
+    path /calls
+  }
+  respond @internal_call_create 403
+
+  # /calls/{sid}/twiml and /calls/{sid}/stream are public (Twilio reaches them).
+  reverse_proxy bot:8000
+}
