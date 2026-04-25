@@ -16,8 +16,8 @@ generator erd {
 
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL")  // Neon pooled connection (pgBouncer) — used by the app at runtime
-  directUrl = env("DIRECT_URL")    // Neon direct connection — used by `prisma migrate` (pooler can't run DDL)
+  url       = env("DATABASE_URL") // Neon pooled connection (pgBouncer) — used by the app at runtime
+  directUrl = env("DIRECT_URL") // Neon direct connection — used by `prisma migrate` (pooler can't run DDL)
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────
@@ -28,9 +28,9 @@ datasource db {
 model User {
   id           String   @id @default(cuid(2))
   email        String   @unique
-  phoneNumber  String   @unique @map("phone_number")  // E.164, e.g. "+14155551234"
-  timezone     String                                 // IANA, e.g. "America/Chicago"
-  passcodeHash String   @map("passcode_hash")         // argon2id; verified by POST /api/auth/login
+  phoneNumber  String   @unique @map("phone_number") // E.164, e.g. "+14155551234"
+  timezone     String // IANA, e.g. "America/Chicago"
+  passcodeHash String   @map("passcode_hash") // argon2id; verified by POST /api/auth/login
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
@@ -177,7 +177,7 @@ model JournalEntry {
   callSessionId String?  @unique @map("call_session_id")
   title         String
   body          String   @db.Text
-  generatedBody String   @db.Text @map("generated_body")
+  generatedBody String   @map("generated_body") @db.Text
   isEdited      Boolean  @default(false) @map("is_edited")
   entryDate     DateTime @map("entry_date") @db.Date
   createdAt     DateTime @default(now()) @map("created_at")
