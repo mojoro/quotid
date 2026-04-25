@@ -509,7 +509,7 @@ The key subtlety: **"user didn't pick up" is a return value, not an exception.**
 
 ## 7. Idempotency & correlation keys
 
-Two workflow entry paths, each with its own ID scheme. Both share a minute-precision timestamp suffix so multiple runs per day — which will happen constantly during development and testing — never collide.
+Two workflow entry paths, each with its own ID scheme. The scheduled path inherits Temporal's auto-appended ISO-8601 fire timestamp (second precision); the manual path constructs its own second-precision suffix. Multiple runs per day — which happen constantly during development and testing — never collide.
 
 | Correlation | Where | Why |
 |---|---|---|
