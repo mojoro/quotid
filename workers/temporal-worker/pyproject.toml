@@ -11,6 +11,9 @@ dependencies = [
   "tenacity>=9.0",
 ]
 
+[project.scripts]
+quotid-worker = "quotid_worker.main:amain"
+
 [dependency-groups]
 dev = [
   "pytest>=8.3",
