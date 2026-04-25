@@ -6,6 +6,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libatomic1 \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY workers/temporal-worker/pyproject.toml workers/temporal-worker/uv.lock /app/
 COPY workers/temporal-worker/quotid_worker /app/quotid_worker
 COPY prisma /app/prisma
