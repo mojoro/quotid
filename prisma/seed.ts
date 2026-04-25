@@ -11,12 +11,13 @@ async function main() {
     parallelism: 1,
   });
 
+  const phoneNumber = process.env.SEED_PHONE_NUMBER ?? "+15555550100";
   await prisma.user.upsert({
     where: { email: "john@example.com" },
-    update: { passcodeHash },
+    update: { passcodeHash, phoneNumber },
     create: {
       email: "john@example.com",
-      phoneNumber: process.env.SEED_PHONE_NUMBER ?? "+15555550100",
+      phoneNumber,
       timezone: "America/Chicago",
       passcodeHash,
     },
