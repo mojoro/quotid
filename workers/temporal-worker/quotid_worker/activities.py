@@ -77,3 +77,20 @@ async def await_call(call_session_id: str) -> CallOutcome:
     """ASYNC-COMPLETED activity. Must use `raise` — calling without raise silently
     completes with None (see temporal-workflow.md §3.1)."""
     raise activity.raise_complete_async()
+
+
+@activity.defn
+async def handle_missed_call(inp: StoreEntryInput) -> None:
+    """Records failure on CallSession; no JournalEntry created for missed calls."""
+    status_map = {
+        CallOutcomeStatus.NO_ANSWER: "NO_ANSWER",
+        CallOutcomeStatus.FAILED: "FAILED",
+    }
+    await prisma.callsession.update(
+        where={"id": inp.outcome.call_session_id},
+        data={
+            "status": status_map.get(inp.outcome.status, "FAILED"),
+            "endedAt": inp.outcome.ended_at,
+            "failureReason": inp.outcome.failure_reason,
+        },
+    )
