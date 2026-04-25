@@ -65,7 +65,7 @@ All transitions are via `workflow.execute_activity(...)`. The workflow body is a
 | `handle_missed_call` | regular | 10 s | default (max 3) | `JournalingWorkflow` (NO_ANSWER/FAILED branch) |
 | `summarize` | regular | 2 min | **custom**: 3 attempts, backoff 5s→60s | `JournalingWorkflow` (COMPLETED branch) |
 | `store_entry` | regular | 15 s | default (max 5) | `JournalingWorkflow` (COMPLETED branch) |
-| `sync_schedule` | regular | 30 s | default (max 3) | **service layer** — `updateCallSchedule` server action only, *not* from `JournalingWorkflow`. See §4. |
+| `sync_schedule` | **not a workflow activity** — pure service function | n/a | n/a | `updateCallSchedule` server action; runs in Next.js Node runtime via `@temporalio/client`. Listed here for catalogue completeness only. |
 
 ### 3.1 Python signatures
 
@@ -166,7 +166,11 @@ class StoreEntryInput:
 
 # ─── Activity definitions ──────────────────────────────────────────────────
 
-@activity.defn
+# NOTE: `sync_schedule` is NOT a Temporal activity (no @activity.defn). It's a
+# plain async function in the Next.js codebase, called from the
+# `updateCallSchedule` server action via @temporalio/client. Kept in this
+# pseudocode block for shape continuity with the activity inputs above; actual
+# implementation lives in app/actions/call-schedule.ts.
 async def sync_schedule(inp: SyncScheduleInput) -> None:
     """Idempotently reconcile the DB `call_schedules` row with its Temporal Schedule.
     Invoked ONLY from the `updateCallSchedule` server action (§4), not from the
