@@ -280,8 +280,10 @@ async def run_bot(websocket: WebSocket, stream_sid: str, call_sid: str) -> None:
         await runner.run(task)
     finally:
         # Pipeline ended — build the outcome and complete the activity.
-        outcome = transcript_accumulator.build_outcome(
+        outcome = await transcript_accumulator.build_outcome(
             call_session_id=corr.call_session_id,
+            call_sid=call_sid,
+            twilio_client=twilio_client,   # constructed at module load from env
         )
         await complete_await_call(
             workflow_id=corr.workflow_id,
@@ -447,16 +449,32 @@ class TranscriptAccumulator(FrameProcessor):
             ))
         await self.push_frame(frame, direction)
 
-    def build_outcome(self, *, call_session_id: str) -> "CallOutcome":
+    async def build_outcome(
+        self,
+        *,
+        call_session_id: str,
+        call_sid: str,
+        twilio_client,
+    ) -> "CallOutcome":
         """
         Merge: user segments from `self._segments` (with audio timestamps)
         PLUS assistant turns read from `self._context.messages` (role ==
         "assistant"; no audio-level timestamps, ordering preserved).
 
-        The merged transcript is good enough for `summarize` (the Sonnet
-        post-call summary needs content + speaker order, not precise
-        milliseconds). Step 6's canonical transcript (Modal + WhisperX)
-        will re-derive timing from the recorded audio if needed.
+        Also fetches `recording_url` from Twilio:
+            recordings = await twilio_client.recordings.list_async(
+                call_sid=call_sid, limit=1,
+            )
+            recording_url = recordings[0].uri if recordings else None
+        Sets `CallOutcome.recording_url` so `store_entry` can persist it
+        to `CallSession.recording_url` for `canonicalize_transcript`
+        (transcription-interface.md §5.3) to consume.
+
+        Async because Twilio's recording lookup is a network call. The
+        merged transcript itself is good enough for `summarize` (the
+        Sonnet post-call summary needs content + speaker order, not
+        precise milliseconds). Step 6's canonical transcript will
+        re-derive timing from the recorded audio if needed.
         """
         ...
 ```

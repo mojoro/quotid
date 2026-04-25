@@ -134,6 +134,13 @@ class CallOutcome:
     transcript_segments: list | None   # present iff COMPLETED
     duration_seconds: int | None
     failure_reason: str | None         # present iff FAILED / NO_ANSWER
+    recording_url: str | None          # present iff COMPLETED and recording succeeded.
+                                       # Twilio recording URL — looked up by Pipecat
+                                       # via twilio.recordings.list(call_sid=...) at
+                                       # pipeline end. Persisted to
+                                       # call_sessions.recording_url by store_entry,
+                                       # later read by canonicalize_transcript
+                                       # (transcription-interface.md §5.3).
 
 
 @dataclass(frozen=True)
@@ -220,7 +227,12 @@ async def summarize(inp: SummarizeInput) -> SummarizeResult:
 @activity.defn
 async def store_entry(inp: StoreEntryInput) -> None:
     """Transactionally: INSERT journal_entries row, UPDATE CallSession
-    (status=COMPLETED, ended_at, duration_seconds, recording_url)."""
+    (status=COMPLETED, ended_at, duration_seconds, recording_url).
+    `recording_url` is sourced from `inp.outcome.recording_url`,
+    populated by Pipecat's `build_outcome` from
+    `twilio.recordings.list(call_sid=...)`. May be None if the
+    recording never landed (rare; canonical transcription will be
+    skipped in that case)."""
 ```
 
 ### 3.2 Workflow body
