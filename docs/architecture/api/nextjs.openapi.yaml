@@ -32,6 +32,8 @@ servers:
     description: Local dev.
 
 tags:
+  - name: auth
+    description: Session lifecycle (login / logout). Single-user MVP, passcode-on-User.
   - name: journal-entries
     description: User-facing journal data.
   - name: call-schedules
