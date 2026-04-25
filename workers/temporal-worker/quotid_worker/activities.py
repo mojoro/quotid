@@ -94,3 +94,40 @@ async def handle_missed_call(inp: StoreEntryInput) -> None:
             "failureReason": inp.outcome.failure_reason,
         },
     )
+
+
+@activity.defn
+async def summarize(inp: SummarizeInput) -> SummarizeResult:
+    """Post-call LLM summary using OpenRouter + Sonnet 4.6."""
+    api_key = os.environ["OPENROUTER_API_KEY"]
+    prompt = (
+        f"You are summarizing a brief journaling phone call from "
+        f"{inp.entry_date} (timezone: {inp.user_timezone}) into a "
+        f"Storyworthy-style entry. Output JSON with two fields: title "
+        f"(short, evocative, ≤8 words) and body (2–4 sentences, "
+        f"first-person, in the user's voice). No markdown, no preamble.\n\n"
+        f"Transcript:\n{inp.transcript_text}"
+    )
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "anthropic/claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+            },
+        )
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"]
+
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ApplicationError(f"summary not JSON: {e}", non_retryable=False) from e
+
+    return SummarizeResult(
+        title=parsed.get("title", "Untitled"),
+        body=parsed.get("body", ""),
+    )
