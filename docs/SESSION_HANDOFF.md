@@ -1,19 +1,36 @@
 # Quotid — Session Handoff
 
-**Written:** 2026-04-24 (end of design session 2); **updated** 2026-04-25 (session 3 — Step 6 + auth spec landed)
+**Written:** 2026-04-24 (end of design session 2); **updated** 2026-04-25 (sessions 3 + 4 — Step 6, auth spec, grilling, plan written + audit-fixed; ready to execute)
 **For:** a fresh Claude Code session resuming this work, possibly on a different machine.
 
 ---
 
-## First thing fresh Claude should say
+## First thing fresh Claude should do
 
-> Read `docs/SESSION_HANDOFF.md` end-to-end. **Design phase is complete (Steps 1–6 + auth spec).** Step 4's known gap (auth login/logout Route Handlers) is closed. We are **mid-way through pre-implementation grilling** (the `grill-me` pattern: one question at a time, with my recommendation, walking the decision tree before writing the Day 3 plan). The last question asked, **paused awaiting your answer**, is:
->
-> **Question 1 — scaffolding strategy: A) horizontal layers vs B) vertical slice?** My recommendation was **B**, with slice 1 = "login lands you on `/journal-entries` (empty list rendered server-side)". Reply **A** or **B** to proceed; further questions follow one-by-one until we have enough decisions to write the actual Day 3 implementation plan. Open infra task in parallel: confirm Oracle A1 capacity in US East (Ashburn) — provisioning may need retries.
+**Design phase is complete. Grilling is complete. The Day 3 implementation plan is written, audited, and revised. You are picking up at the start of execution.**
 
-If the user says "just proceed," assume interpretation **C** for WhatsApp (meeting medium, not product integration), **US East (Ashburn)** as the Oracle home region (both confirmed in session 3), and **B (vertical slice)** for the scaffolding strategy.
+The plan is at `docs/superpowers/plans/2026-04-25-day3-scaffolding.md` (revision r2 — see its top-of-file revision log for what was fixed in the audit pass before execution). It is structured for **subagent-driven execution**: 5 slices + 1 bonus, ~50 atomic tasks, each with exact file paths, full code, expected commands, and per-commit messages.
 
-**Tooling note for fresh Claude:** the `grill-me` skill (`mattpocock/skills@grill-me`, installed at `~/.agents/skills/grill-me/`) drives this pattern. Auto-discovery should pick it up; if it doesn't appear, follow the pattern manually — interview the user relentlessly about every aspect of the plan until shared understanding, walk the design tree, ask questions one at a time, provide your recommended answer for each, and explore the codebase rather than asking when a question can be answered that way.
+**Your literal first action:**
+
+1. Greet the user briefly (one line — they're going to clear your context shortly anyway).
+2. Invoke `superpowers:subagent-driven-development` skill via the Skill tool.
+3. Read the plan once at `docs/superpowers/plans/2026-04-25-day3-scaffolding.md`. Extract every task's full text and "Files" block into your TodoWrite list before dispatching anything.
+4. Confirm with the user that Pre-Task A (Oracle A1 provisioning retry loop) is running in parallel outside your session — it's their job, not yours.
+5. Begin dispatching subagent-driven implementation starting with **Slice 1 Task 1.1**. Use the implementer prompt template; review each task with the spec-compliance reviewer THEN code-quality reviewer (in that order) before moving on.
+
+**Hard constraints — failure-mode prevention:**
+
+- **Commit style is enforced by a PreToolUse hook.** Subject-only, no body, no Conventional Commits prefix, no Co-Authored-By, no AI attribution. The hook will physically block any commit that uses multiple `-m` flags, a HEREDOC, `-F`, or newlines in the message. The plan's commit messages are already in this style — do not "improve" them. See `~/.claude/projects/-home-john-repos-quotid/memory/feedback_commit_style.md`.
+- **Atomic commits.** Each commit = exactly one logical change. The plan already enforces this; do not bundle.
+- **Push: never without explicit user consent.** The branch is many commits ahead of `origin/main` from prior sessions. Do not `git push` unless the user asks.
+- **The plan is authoritative.** Do not improvise activity names, retry policies, file paths, or imports. They were audit-fixed against `docs/architecture/temporal-workflow.md` and `docs/architecture/pipecat-pipeline.md`. Any divergence you feel tempted to introduce should first surface as a question to the user.
+- **Caveman mode** is active (terse prose, fragments OK) for talking to the user. Does NOT extend to code, security writeups, or commits.
+- **Learning output style** is active. The plan calls out **Slice 1 Task 1.10 (TanStack hydration)** as a hands-on learning hotspot — surface this to the user when you reach that task; consider asking for a `TODO(human)` insertion at the `useQuery` call site.
+
+**If `superpowers:subagent-driven-development` skill is unavailable**, fall back to `superpowers:executing-plans` with checkpoints. Either way, do not execute the plan inline without review checkpoints.
+
+**External dependencies (Pre-Tasks B + C in the plan):** the user is responsible for capturing Twilio / Neon / Deepgram / OpenRouter / Cartesia / cloudflared credentials into `.env` before Slice 1 Task 1.1 lands. Verify with them before starting Task 1.3 (which needs `DATABASE_URL` + `DIRECT_URL`).
 
 ---
 
@@ -61,9 +78,13 @@ If the user says "just proceed," assume interpretation **C** for WhatsApp (meeti
 | 5 | Pipecat pipeline | ✅ audit-passed | `docs/architecture/pipecat-pipeline.md` |
 | 6 | Modal transcription interface | ✅ | `docs/architecture/transcription-interface.md` |
 | 6.5 | Auth login/logout spec (closes Step 4 gap) | ✅ | `docs/architecture/api/nextjs.openapi.yaml` + `prisma/schema.prisma` |
-| 7+ | Scaffolding / implementation | ⏳ **NEXT** | Day 3 activity. |
+| 7   | Pre-implementation grilling (16 architectural decisions) | ✅ session 4 | `docs/superpowers/plans/2026-04-25-day3-scaffolding.md` decision-summary table |
+| 8   | Day 3 implementation plan | ✅ written, audited, revised (r2) | `docs/superpowers/plans/2026-04-25-day3-scaffolding.md` |
+| 9+  | Scaffolding / implementation | ⏳ **NEXT — execute via `superpowers:subagent-driven-development`** | runs against the plan above |
 
 All six completed design docs are self-contained, internally consistent, and have been audited against live library/platform docs (Temporal Python SDK, Prisma 6, Pipecat current API, Zalando RESTful API Guidelines, OpenAPI 3.1, RFC 9457).
+
+The Day 3 plan was audited against the design docs in session 4 (2026-04-25) — found 7 CRITICAL bugs (notably the silent-deadlock `raise activity.raise_complete_async()` pattern, activity-name divergence from `temporal-workflow.md`, and a Caddy-public-vs-internal-URL bug in `initiate_call`). All CRITICAL + 8 of 10 IMPORTANT items fixed. See the plan's revision-log block at the top of the file.
 
 ## What's done — file inventory
 
@@ -180,16 +201,12 @@ These are the decisions already settled. If the user wants to reopen any, engage
 
 ## Next actions — priority order
 
-1. **Start Oracle A1 provisioning retry loop in US East (Ashburn).** Out-of-host-capacity is the dominant failure mode; queue retries from a phone or background VM while coding. Falls through to Phoenix → Hetzner.
-2. **Day 3 scaffolding.** Order matters — DB and Temporal first because everything else binds to them.
-   1. Repo layout (`apps/web`, `apps/pipecat-bot`, `workers/temporal-worker`, `prisma/`).
-   2. `compose.yaml` + `Caddyfile` (single-host Docker Compose, Caddy auto-TLS).
-   3. `npx prisma migrate dev --name init` against local Postgres or Neon dev branch — emits Prisma client; ERD regenerates to `docs/architecture/erd.md`. Includes the new `Session` model and `User.passcodeHash` column from session 3.
-   4. `temporal server start-dev` smoke test + Python worker skeleton (no activities wired yet).
-   5. Next.js 16 init + middleware reading `quotid_session`.
-   6. FastAPI Pipecat bot skeleton + `POST /calls` stub.
-3. **Implement auth thinly first.** A working `/login` page + middleware → unblocks every other Route Handler. ~1 hr.
-4. **Wire one happy-path activity end-to-end** — pick `prepare_call` (read user row, generate Twilio TwiML URL). Confirms Prisma-Python + Temporal worker plumbing before fanning out.
+1. **Start (or confirm) Oracle A1 provisioning retry loop in US East (Ashburn).** Out-of-host-capacity is the dominant failure mode; queue retries from a phone or background VM while coding. Falls through to Phoenix → Hetzner. The plan's Pre-Task A documents this.
+2. **Confirm Pre-Task B + C credentials (Twilio, Neon, Deepgram, OpenRouter, Cartesia, cloudflared) are captured.** Fresh Claude verifies with the user before Slice 1 Task 1.3.
+3. **Execute the Day 3 implementation plan via subagent-driven development.** Plan path: `docs/superpowers/plans/2026-04-25-day3-scaffolding.md`. Slice ordering and per-task content are locked. Skill: `superpowers:subagent-driven-development`.
+4. **At Slice 4 Task 4.13** (first real end-to-end call), pause for the user — they need to be on their phone for the demo verification.
+5. **At Slice 5 Task 5.7** (deploy + first call against deployed system), pause again — DNS, Caddy TLS issuance, and the second real call all need user-side verification.
+6. **Bonus Slice 6** is a one-line placeholder. Only build if S1–S5 land before end of day 1; surface to the user before starting.
 
 ## Repo state
 
