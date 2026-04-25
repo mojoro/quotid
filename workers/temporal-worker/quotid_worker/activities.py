@@ -70,3 +70,10 @@ async def initiate_call(inp: InitiateCallInput) -> InitiateCallResult:
         data={"twilioCallSid": sid, "status": "DIALING"},
     )
     return InitiateCallResult(twilio_call_sid=sid)
+
+
+@activity.defn
+async def await_call(call_session_id: str) -> CallOutcome:
+    """ASYNC-COMPLETED activity. Must use `raise` — calling without raise silently
+    completes with None (see temporal-workflow.md §3.1)."""
+    raise activity.raise_complete_async()
