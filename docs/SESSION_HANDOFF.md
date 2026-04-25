@@ -1,13 +1,53 @@
 # Quotid — Session Handoff
 
-**Written:** 2026-04-24 (end of design session 2); **updated** 2026-04-25 (sessions 3 + 4 — Step 6, auth spec, grilling, plan written + audit-fixed; ready to execute)
+**Written:** 2026-04-24 (end of design session 2); **last updated** 2026-04-25 (session 5 — full execution + Lightsail deploy. **Quotid is live at https://quotid.johnmoorman.com**)
 **For:** a fresh Claude Code session resuming this work, possibly on a different machine.
+
+---
+
+## Status: SHIPPED
+
+End-to-end demo runs in production. Login → trigger → phone rings → Storyworthy conversation → Deepgram Aura TTS → outcome posted to Temporal → OpenRouter Sonnet 4.6 summary → JournalEntry persisted → entry visible in `/journal-entries` list and detail page. All 5 Slice 1–5 components deployed via `docker compose` on AWS Lightsail us-east-1 (`3.214.75.222`), Caddy auto-issued Let's Encrypt certs.
+
+**Production URLs:**
+- App: `https://quotid.johnmoorman.com` (Next.js)
+- Bot: `https://v.quotid.johnmoorman.com` (Pipecat WSS public; POST `/calls` Caddy-403'd)
+
+**Dev URLs (local cloudflared `quotid-voice` tunnel):**
+- App: `https://quodev.johnmoorman.com`
+- Bot: `https://quovoice.johnmoorman.com`
+
+---
+
+## Divergences from the original plan (corrected during execution)
+
+The Day 3 plan + design docs were the contract. Reality during execution and deploy required 10 corrections; **this handoff is now ground truth, not the older docs**:
+
+1. **TTS: Cartesia → Deepgram Aura.** Cartesia trial credits exhausted. `QuotidDeepgramTTSService(DeepgramTTSService)` with voice `aura-2-thalia-en`. The empty-subclass Modal swap point (decision #11) is preserved.
+2. **Deploy host: Oracle A1 Always-Free → AWS Lightsail us-east-1.** Oracle out-of-host-capacity loop unreliable; Lightsail $24/mo (4 GB / 2 vCPU / 80 GB). Cost envelope changes from ~$0/mo infra to $24/mo. compose.yaml + Caddyfile + Dockerfiles unchanged.
+3. **IDs: cuid(2) → cuid().** `prisma-client-python` 0.15 bundles a Prisma 5.x engine that doesn't parse `cuid(2)`. cuid v1 (25-char) is collision-safe enough for MVP. Revisit when prisma-client-python catches up.
+4. **Subdomain pattern.** Production uses `quotid.johnmoorman.com` (web) + `v.quotid.johnmoorman.com` (bot). Dev tunnel uses `quodev.` + `quovoice.` to keep prod DNS clean during testing.
+5. **Pipecat OpenAI import path.** `pipecat.services.openai.llm`, not `pipecat.services.openai` — Pipecat 1.0.0 made it a package without top-level re-exports.
+6. **TS Temporal async-completion API.** `client.activity.complete({workflowId, activityId}, payload)` — `@temporalio/client` does NOT have `getAsyncCompletionHandle`; `client.activity` IS the AsyncCompletionClient.
+7. **Forwarded-header handling.** Behind any reverse proxy (cloudflared, Caddy), `req.url` reflects the internal host. proxy.ts, login/logout/watchdog routes, and bot `/twiml` all read `x-forwarded-proto` + `x-forwarded-host` to construct redirects and verify signatures.
+8. **Pipeline shutdown.** `on_client_disconnected` event handler in pipeline.py calls `task.cancel()` — without it `runner.run(task)` hangs after WSS closes and outcome never posts.
+9. **Required runtime deps not in any spec:** `python-multipart` (FastAPI form parsing for /twiml), `libatomic1` in worker Dockerfile (prisma-client-python bundles a node binary that needs it), `prisma-client-python` npm shim at root (lets the JS prisma generate invoke the Python generator).
+10. **proxy.ts public prefix.** `PUBLIC_PREFIXES` includes `/api/webhooks/` — without it Twilio status callbacks get 303-redirected to /login.
 
 ---
 
 ## First thing fresh Claude should do
 
-**Design phase is complete. Grilling is complete. The Day 3 implementation plan is written, audited, and revised. You are picking up at the start of execution.**
+The shipped state is what you inherit. The original plan and design docs are now design-time intent; this handoff is the corrected ground truth. **Don't re-execute the plan.** If the user asks about a divergence, the table above explains what changed and why.
+
+**Recovery operations** (most likely tasks if something breaks):
+
+- Bot/worker won't talk to each other locally → check `BOT_INTERNAL_URL` is `http://localhost:8000` in dev `.env` (in compose it's `http://bot:8000`).
+- Twilio webhook returns 403 → forwarded-header handling broke; verify x-forwarded-proto/host are reaching Next.js.
+- Workflow stuck in DIALING → bot crashed mid-call. Check `runner.run(task)` exception path; ensure `task.cancel()` runs on `on_client_disconnected`.
+- Journal entry doesn't appear after call → store_entry retries (3) likely exhausted on a Prisma error. Check worker logs for `MissingRequiredValueError` or type errors. Activities use `connect: {id}` for transcript relations and `datetime.combine(...)` for `entryDate` (date.today() doesn't serialize).
+
+**Old text below this line is design-time history. Do not act on instructions in it without checking the divergence table above first.**
 
 The plan is at `docs/superpowers/plans/2026-04-25-day3-scaffolding.md` (revision r2 — see its top-of-file revision log for what was fixed in the audit pass before execution). It is structured for **subagent-driven execution**: 5 slices + 1 bonus, ~50 atomic tasks, each with exact file paths, full code, expected commands, and per-commit messages.
 
