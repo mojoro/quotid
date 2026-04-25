@@ -7,7 +7,14 @@ from temporalio.worker import Worker
 
 from .config import CONFIG
 from .db import connect, disconnect
-from .activities import create_call_session
+from .activities import (
+    create_call_session,
+    initiate_call,
+    await_call,
+    handle_missed_call,
+    summarize,
+    store_entry,
+)
 from .workflows import JournalingWorkflow
 
 
@@ -26,7 +33,14 @@ async def amain() -> None:
         client,
         task_queue=CONFIG.task_queue,
         workflows=[JournalingWorkflow],
-        activities=[create_call_session],
+        activities=[
+            create_call_session,
+            initiate_call,
+            await_call,
+            handle_missed_call,
+            summarize,
+            store_entry,
+        ],
     )
 
     try:
