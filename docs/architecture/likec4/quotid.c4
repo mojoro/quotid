@@ -70,8 +70,8 @@ model {
   openrouter = system 'OpenRouter' {
     description 'LLM routing. Claude Haiku in-call, Sonnet post-call.'
   }
-  cartesia = system 'Cartesia' {
-    description 'Real-time TTS (Sonic)'
+  deepgramTts = system 'Deepgram TTS' {
+    description 'Real-time TTS (Aura). Same API key as STT; different service endpoint.'
   }
   neon = database 'Neon Postgres' {
     description 'Managed Postgres — journal data'
@@ -102,7 +102,7 @@ model {
   quotid.pipecat -> twilio 'calls.create + Media Streams' { technology 'REST + WSS' }
   quotid.pipecat -[wss]-> deepgram 'Stream audio for STT'
   quotid.pipecat -[https]-> openrouter 'Per-turn LLM calls (Haiku)'
-  quotid.pipecat -[wss]-> cartesia 'TTS synthesis'
+  quotid.pipecat -[wss]-> deepgramTts 'TTS synthesis'
   quotid.pipecat -[grpc]-> quotid.worker 'Async activity completion on call end'
 }
 
@@ -117,8 +117,8 @@ deployment {
     description 'Chrome / Safari / Firefox'
   }
 
-  oracleVm = vm 'Oracle Cloud Ampere A1' {
-    description 'Always-Free, Ubuntu 22.04, 4 vCPU / 24 GB RAM. Docker Compose.'
+  lightsailVm = vm 'AWS Lightsail us-east-1' {
+    description 'Ubuntu 22.04, 4 GB / 2 vCPU. Docker Compose.'
 
     instanceOf quotid.caddy
     instanceOf quotid.web
@@ -142,7 +142,7 @@ deployment {
     description 'Third-party SaaS'
     instanceOf deepgram
     instanceOf openrouter
-    instanceOf cartesia
+    instanceOf deepgramTts
   }
 }
 
@@ -184,7 +184,7 @@ views {
     twilio -> quotid.pipecat 'Opens WSS /calls/{sid}/stream' { technology 'WSS, μ-law 8kHz' }
     quotid.pipecat -> deepgram 'Stream audio → transcripts' { technology 'WSS' }
     quotid.pipecat -> openrouter 'Per turn: transcript → Claude Haiku' { technology 'HTTPS' }
-    quotid.pipecat -> cartesia 'Stream text → PCM audio chunks' { technology 'WSS' }
+    quotid.pipecat -> deepgramTts 'Stream text → PCM audio chunks' { technology 'WSS' }
     quotid.pipecat -> twilio 'Send synthesized audio out Media Stream' { technology 'WSS' }
     user -> twilio 'Hangs up (or bot ends)' { technology 'PSTN' }
     quotid.pipecat -> quotid.worker 'complete_activity(wf_id, activity_id, payload)' { technology 'Temporal SDK / gRPC' }
@@ -221,8 +221,8 @@ views {
     quotid.pipecat <- deepgram 'final transcript (turn boundary)'
     quotid.pipecat -> openrouter 'POST /chat/completions (Haiku)'
     quotid.pipecat <- openrouter 'assistant response text'
-    quotid.pipecat -> cartesia 'synthesize(response)'
-    quotid.pipecat <- cartesia 'PCM chunks'
+    quotid.pipecat -> deepgramTts 'synthesize(response)'
+    quotid.pipecat <- deepgramTts 'PCM chunks'
     quotid.pipecat -> twilio 'outbound audio frames'
     twilio -> user 'assistant speaks'
 
