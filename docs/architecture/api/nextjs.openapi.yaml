@@ -297,7 +297,7 @@ components:
       name: id
       in: path
       required: true
-      description: JournalEntry cuid2 ID.
+      description: JournalEntry cuid v1 ID.
       schema:
         type: string
         minLength: 20
@@ -333,7 +333,7 @@ components:
       properties:
         id:
           type: string
-          description: cuid2.
+          description: cuid v1 (25 chars).
         user_id:
           type: string
         call_session_id:
