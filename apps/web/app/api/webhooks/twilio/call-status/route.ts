@@ -14,7 +14,10 @@ const STATUS_MAP: Record<string, "NO_ANSWER" | "FAILED"> = {
 
 export async function POST(req: NextRequest) {
   const sig = req.headers.get("x-twilio-signature") ?? "";
-  const url = new URL(req.url);
+  const proto = req.headers.get("x-forwarded-proto") ?? new URL(req.url).protocol.replace(":", "");
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? new URL(req.url).host;
+  const reqPath = new URL(req.url).pathname + new URL(req.url).search;
+  const externalUrl = `${proto}://${host}${reqPath}`;
   const formText = await req.text();
   const params = new URLSearchParams(formText);
   const paramsObj = Object.fromEntries(params.entries());
@@ -22,7 +25,7 @@ export async function POST(req: NextRequest) {
   const valid = twilio.validateRequest(
     process.env.TWILIO_AUTH_TOKEN!,
     sig,
-    url.toString(),
+    externalUrl,
     paramsObj
   );
   if (!valid) return new NextResponse("Forbidden", { status: 403 });
