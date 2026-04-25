@@ -107,4 +107,8 @@ def build_pipeline(
     async def kick_off(_t, _client):
         await task.queue_frames([TextFrame(OPENING_LINE)])
 
+    @transport.event_handler("on_client_disconnected")
+    async def on_disconnect(_t, _client):
+        await task.cancel()
+
     return task, accumulator, context
