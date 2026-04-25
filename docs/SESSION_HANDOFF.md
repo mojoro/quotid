@@ -1,15 +1,15 @@
 # Quotid — Session Handoff
 
-**Written:** 2026-04-24 (end of design session 2)
+**Written:** 2026-04-24 (end of design session 2); **updated** 2026-04-25 (session 3 — Step 6 + auth spec landed)
 **For:** a fresh Claude Code session resuming this work, possibly on a different machine.
 
 ---
 
 ## First thing fresh Claude should say
 
-> Read `docs/SESSION_HANDOFF.md` end-to-end. Steps 1–5 of the design phase are complete and audit-passed. Step 6 (Modal transcription interface) is the last remaining design step. The blocking open question is **"what does 'via WhatsApp' mean for the demo?"** (see §Open questions below) — answer that, confirm the Oracle region choice, and I'll write Step 6.
+> Read `docs/SESSION_HANDOFF.md` end-to-end. **Design phase is complete (Steps 1–6 + auth spec).** Step 4's known gap (auth login/logout Route Handlers) is closed. Day 3 is scaffolding work: Docker Compose + Caddyfile + Next.js 16 init + Pipecat FastAPI skeleton + Python Temporal worker + `prisma migrate dev`. Open infra task: confirm Oracle A1 capacity in US East (Ashburn) — provisioning may need retries.
 
-If the user says "just proceed," assume interpretation **C** for WhatsApp (meeting medium, not product integration) and assume **US East (Ashburn)** as the Oracle home region.
+If the user says "just proceed," assume interpretation **C** for WhatsApp (meeting medium, not product integration) and **US East (Ashburn)** as the Oracle home region (both confirmed in session 3).
 
 ---
 
@@ -55,10 +55,11 @@ If the user says "just proceed," assume interpretation **C** for WhatsApp (meeti
 | 3 | Temporal workflow | ✅ audit-passed | `docs/architecture/temporal-workflow.md` |
 | 4 | API contract (OpenAPI 3.1 + Server Actions) | ✅ audit-passed, Zalando-aligned | `docs/architecture/api/` (README + 2 YAML specs + server-actions.md) |
 | 5 | Pipecat pipeline | ✅ audit-passed | `docs/architecture/pipecat-pipeline.md` |
-| 6 | Modal transcription interface | ⏳ **NEXT** | To be written. |
-| 7+ | Scaffolding / implementation | ⏳ | Day 3 activity. |
+| 6 | Modal transcription interface | ✅ | `docs/architecture/transcription-interface.md` |
+| 6.5 | Auth login/logout spec (closes Step 4 gap) | ✅ | `docs/architecture/api/nextjs.openapi.yaml` + `prisma/schema.prisma` |
+| 7+ | Scaffolding / implementation | ⏳ **NEXT** | Day 3 activity. |
 
-All five completed design docs are self-contained, internally consistent, and have been audited against live library/platform docs (Temporal Python SDK, Prisma 6, Pipecat current API, Zalando RESTful API Guidelines, OpenAPI 3.1, RFC 9457).
+All six completed design docs are self-contained, internally consistent, and have been audited against live library/platform docs (Temporal Python SDK, Prisma 6, Pipecat current API, Zalando RESTful API Guidelines, OpenAPI 3.1, RFC 9457).
 
 ## What's done — file inventory
 
@@ -146,8 +147,11 @@ These are the decisions already settled. If the user wants to reopen any, engage
 **Security / networking (locked in session 1):**
 14. **Only Caddy is public.** Pipecat's `POST /calls` is Docker-network only (Caddy matcher excludes). Pipecat's `/calls/{sid}/twiml` and `/calls/{sid}/stream` are public because Twilio must reach them; authenticated via `X-Twilio-Signature` (including on the WSS upgrade request).
 
-**Deferred (interface to be designed in Step 6):**
-15. **Modal + WhisperX canonical transcript** — to be added as a second `Transcript` row (kind=`CANONICAL`) alongside the MVP realtime Deepgram transcript. No schema migration needed; the `TranscriptKind` enum already has the slot.
+**Modal + canonical transcript (Step 6, locked session 3):**
+15. **Modal + WhisperX canonical transcript** — second `Transcript` row (kind=`CANONICAL`) populated by post-call `canonicalize_transcript` Temporal activity. MVP provider is `DeepgramBatchTranscriptProvider`; future swap to `ModalWhisperXProvider` is a one-line worker-bootstrap change. Tail-of-`JournalingWorkflow` placement; `CANONICAL_TRANSCRIPT_ENABLED` worker-startup flag. **Fallback policy:** silent skip + structured `canonical_transcript_skipped` warning log on `ActivityError` — canonical is background enhancement; product never blocks on it. Full design: `docs/architecture/transcription-interface.md`.
+
+**Auth (session 3, closes Step 4 gap):**
+18. **Passcode-on-User auth, server-side argon2id verification.** `User.passcodeHash` column. `POST /api/auth/login` issues a `quotid_session` cookie (HttpOnly, Secure, SameSite=Lax, Max-Age=2592000); `POST /api/auth/logout` deletes the row + clears the cookie. New `Session` model stores `(token, userId, expiresAt)`. 5/15min IP rate limit on login. Logout idempotent — works without a valid cookie.
 
 **Defaults chosen session 2 (settles session 1's open questions):**
 16. Phone number → provision a new Twilio number. Passcode → on `User` table (no separate `AuthMethod`). Python worker DB access → `prisma-client-python` (typed, mirrors Next.js). Recording retention → Twilio-hosted URLs (ephemeral) for MVP.
@@ -155,30 +159,13 @@ These are the decisions already settled. If the user wants to reopen any, engage
 **API naming (locked in session 2):**
 17. **Zalando Option B:** `snake_case` on HTTP/JSON boundaries (Pipecat REST, Next.js REST, webhook bodies), `camelCase` in Server Actions (not REST, TS-native). `CallSid`/`CallStatus` etc. from Twilio kept PascalCase (Twilio's contract). One documented deviation: `/api` prefix on Next.js routes.
 
-## Open questions — blocking Step 6 / scaffolding
+## Open questions — blocking scaffolding
 
-**1. What does "via WhatsApp" mean for the demo?** (session 2, unresolved)
+**1. ~~WhatsApp interpretation.~~** **Resolved session 3:** interpretation **C** (interviewer-facing meeting medium; product remains PSTN). Architecture unchanged.
 
-User said: *"the demo call will have to be made to a german number though, or via whatsapp"*. Interpretation matters:
+**2. ~~Oracle Cloud home region.~~** **Resolved session 3:** **US East (Ashburn)**. Action item: start A1 provisioning loop in parallel with Day 3 scaffolding. Fall back to Phoenix if Ashburn A1 capacity unavailable; fall back to Hetzner CAX11 (€3.79/mo) if Oracle A1 stays out-of-capacity through 2026-04-26.
 
-- **A.** Live WhatsApp voice call → **not feasible** via programmable APIs. Would require redesign.
-- **B.** WhatsApp voice messages (async audio) → feasible via Twilio WhatsApp Business API with media attachments, but is a **different pipeline** — no real-time turn-taking, no VAD/SmartTurn, no interruption handling. Current Pipecat design doesn't apply.
-- **C.** WhatsApp is just the interviewer-facing meeting medium (screen share); product is still PSTN. Current architecture is fine.
-- **D.** Fallback if Twilio PSTN doesn't work for regulatory/capacity reasons. Would mean rebuilding the voice pipeline.
-
-**Most likely is C**, but confirm before proceeding. If it's A, B, or D, design needs rework.
-
-**2. Oracle Cloud home region.** (session 2, awaiting question 1 answer)
-
-- Home region is **permanent** per account; affects free tier availability.
-- German phone demo → Frankfurt VM is slight voice-latency winner (~50–100 ms) but A1 capacity is historically bad there.
-- US phone demo or WhatsApp path → **US East (Ashburn)** is colocated with Neon, Twilio US edge, Anthropic/Deepgram/Cartesia. A1 typically easier to provision.
-- **Current recommendation: US East (Ashburn)** for operational reliability; fallback Phoenix if Ashburn A1 capacity unavailable. Deadline risk > voice polish for 3-day ship target.
-- User should try provisioning the VM *today* regardless of code progress — A1 provisioning can take hours to days ("out of host capacity" retries).
-
-**3. Auth login/logout flow.** (session 2, Step 4 known gap)
-
-Route Handlers `POST /api/auth/login` and `POST /api/auth/logout` are referenced in the API spec's security schemes but not spec'd. Passcode-on-User was the chosen default. Needs ~10 min of spec work before web surface scaffolding. Shape expected: form POST with passcode → validate → issue `quotid_session` cookie → redirect.
+**3. ~~Auth login/logout spec.~~** **Resolved session 3:** specced in `nextjs.openapi.yaml` + `User.passcodeHash` and `Session` model added to `prisma/schema.prisma`. See decision #18 above.
 
 **4. Step 5 open implementation questions** (defer until scaffolding):
 - Cartesia voice selection (MVP: env var with one hardcoded voice).
@@ -189,17 +176,22 @@ Route Handlers `POST /api/auth/login` and `POST /api/auth/logout` are referenced
 
 ## Next actions — priority order
 
-1. **Resolve open question #1** (WhatsApp interpretation) — 2 minutes.
-2. **Resolve open question #2** (Oracle region) — 2 minutes + start A1 provisioning retry loop in background.
-3. **Write Step 6** (Modal transcription interface) — ~30 min. Define `TranscriptProvider` Python protocol, MVP `DeepgramBatchTranscriptProvider` adapter, future `ModalWhisperXProvider` sketch, activity signature in `JournalingWorkflow` (optional canonical transcript step), fallback policy if Modal is down.
-4. **Write auth login/logout spec** — ~10 min. Add to `nextjs.openapi.yaml` + update server-actions.md cross-refs.
-5. **Begin scaffolding (Day 3)** — per the repo layout sketch below. Docker Compose + Caddyfile + app directories. Use `prisma generate` to emit the client; set up `temporal server start-dev`; FastAPI skeleton; Next.js 16 init.
+1. **Start Oracle A1 provisioning retry loop in US East (Ashburn).** Out-of-host-capacity is the dominant failure mode; queue retries from a phone or background VM while coding. Falls through to Phoenix → Hetzner.
+2. **Day 3 scaffolding.** Order matters — DB and Temporal first because everything else binds to them.
+   1. Repo layout (`apps/web`, `apps/pipecat-bot`, `workers/temporal-worker`, `prisma/`).
+   2. `compose.yaml` + `Caddyfile` (single-host Docker Compose, Caddy auto-TLS).
+   3. `npx prisma migrate dev --name init` against local Postgres or Neon dev branch — emits Prisma client; ERD regenerates to `docs/architecture/erd.md`. Includes the new `Session` model and `User.passcodeHash` column from session 3.
+   4. `temporal server start-dev` smoke test + Python worker skeleton (no activities wired yet).
+   5. Next.js 16 init + middleware reading `quotid_session`.
+   6. FastAPI Pipecat bot skeleton + `POST /calls` stub.
+3. **Implement auth thinly first.** A working `/login` page + middleware → unblocks every other Route Handler. ~1 hr.
+4. **Wire one happy-path activity end-to-end** — pick `prepare_call` (read user row, generate Twilio TwiML URL). Confirms Prisma-Python + Temporal worker plumbing before fanning out.
 
 ## Repo state
 
-Working directory: `/Users/john/repos/quotid` on this machine. Fresh session on another machine: clone the repo, everything needed is in git.
+Working directory varies by machine: `/Users/john/repos/quotid` (macOS, session 1–2) or `/home/john/repos/quotid` (Linux, session 3). Both are clones of the same git repo. Fresh session on another machine: clone, everything needed is in git.
 
-**Current tree (end of session 2):**
+**Current tree (end of session 3):**
 
 ```
 quotid/
@@ -220,13 +212,14 @@ quotid/
 │       │   └── README.md
 │       ├── temporal-workflow.md               ← Step 3 source of truth
 │       ├── pipecat-pipeline.md                ← Step 5 source of truth
+│       ├── transcription-interface.md         ← Step 6 source of truth (session 3)
 │       └── api/
-│           ├── README.md                      ← Step 4 index + boundary map
+│           ├── README.md                      ← Step 4 index + boundary map (session 3: auth row added)
 │           ├── pipecat-bot.openapi.yaml       ← Step 4
-│           ├── nextjs.openapi.yaml            ← Step 4
+│           ├── nextjs.openapi.yaml            ← Step 4 + session 3 (auth login/logout)
 │           └── server-actions.md              ← Step 4
 └── prisma/
-    └── schema.prisma                          ← Step 2 source of truth
+    └── schema.prisma                          ← Step 2 source of truth (session 3: passcodeHash + Session)
 ```
 
 **Planned for Day 3 scaffolding:**
@@ -257,4 +250,23 @@ quotid/
 
 ---
 
-**Session 2 commits:** steps 3–5 docs, api/ directory, likec4 bug fix, gitignore, this handoff update. All in one atomic commit.
+**Session 2 commits:** steps 3–5 docs, api/ directory, likec4 bug fix, gitignore, this handoff update. All in one atomic commit (`8293f96`).
+
+**Session 3 changes (uncommitted as of writing):**
+- `docs/architecture/transcription-interface.md` — Step 6 design doc (new); §7 fallback policy = option (a) silent skip + structured warning log; §5.3 `recording_url` gap marked resolved.
+- `prisma/schema.prisma` — added `User.passcodeHash`, new `Session` model with `(token, userId, expiresAt)`.
+- `docs/architecture/api/nextjs.openapi.yaml` — added `POST /auth/login` and `POST /auth/logout` paths, `LoginRequest` schema, `auth` tag.
+- `docs/architecture/api/README.md` — auth rows added to the auth/authz table; changelog entry for 2026-04-25.
+- `docs/architecture/temporal-workflow.md` — audit fixes: §7 preamble (minute → second precision); §4 schedule client clarified as TypeScript `@temporalio/client` running in Next.js; `CallOutcome.recording_url` field added (§3.1); `sync_schedule` reclassified from "activity" to "service function in TS server action."
+- `docs/architecture/pipecat-pipeline.md` — `TranscriptAccumulator.build_outcome` is now async and fetches the recording URL from Twilio at pipeline end; `bot.py` skeleton updated accordingly.
+- `docs/SESSION_HANDOFF.md` — this file, refreshed.
+
+**Soft inconsistencies (tracked, not blocking):**
+- `docs/architecture/likec4/quotid.c4` does not model `worker → deepgram` (would be needed only when `CANONICAL_TRANSCRIPT_ENABLED=true`; MVP ships Minimal). Add the relationship at the same time the flag is flipped.
+- `docs/architecture/erd.md` is stale — does not yet show `User.passcodeHash` or `Session`. Will regenerate on first `npx prisma generate` during Day 3 scaffolding.
+
+Recommended commit split (atomic, one logical change each):
+1. `prisma/schema.prisma` — auth schema (passcodeHash + Session model).
+2. `docs/architecture/transcription-interface.md` — Step 6 design.
+3. `docs/architecture/api/{nextjs.openapi.yaml,README.md}` — auth endpoint spec.
+4. `docs/SESSION_HANDOFF.md` — handoff refresh.
