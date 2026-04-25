@@ -37,8 +37,35 @@ model User {
   callSchedule   CallSchedule?
   callSessions   CallSession[]
   journalEntries JournalEntry[]
+  sessions       Session[]
 
   @@map("users")
+}
+
+// ─── Sessions ─────────────────────────────────────────────────────────────
+// Opaque session tokens issued by POST /api/auth/login and validated by
+// Next.js middleware. 30-day TTL with sliding-window refresh on use.
+// One row per active login; a logout deletes its row. Expired rows are
+// pruned by a maintenance task (out of MVP scope; rely on TTL semantics
+// in the validator).
+
+model Session {
+  id        String   @id @default(cuid(2))
+  userId    String   @map("user_id")
+  // Token is the cookie value. Stored in plaintext: it's a 256-bit URL-safe
+  // random string with no exploitable structure. If the DB is compromised
+  // the attacker already has every journal entry — hashing the token doesn't
+  // raise the bar meaningfully and would forfeit cheap point-lookups.
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
 }
 
 // ─── Call schedule ────────────────────────────────────────────────────────
