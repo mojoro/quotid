@@ -74,7 +74,7 @@ export async function POST(req: NextRequest) {
   await prisma.session.create({ data: { token, userId: user.id, expiresAt } });
 
   const target = next?.startsWith("/") ? next : "/journal-entries";
-  const res = NextResponse.redirect(new URL(target, req.url), 303);
+  const res = NextResponse.redirect(new URL(target, publicBase(req)), 303);
   res.cookies.set(SESSION_COOKIE, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
@@ -86,8 +86,14 @@ export async function POST(req: NextRequest) {
 }
 
 function redirectWithError(req: NextRequest, code: string, next?: string) {
-  const url = new URL("/login", req.url);
+  const url = new URL("/login", publicBase(req));
   url.searchParams.set("error", code);
   if (next) url.searchParams.set("next", next);
   return NextResponse.redirect(url, 303);
+}
+
+function publicBase(req: NextRequest): string {
+  const proto = req.headers.get("x-forwarded-proto") ?? new URL(req.url).protocol.replace(":", "");
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? new URL(req.url).host;
+  return `${proto}://${host}`;
 }

@@ -7,7 +7,9 @@ export async function POST(req: NextRequest) {
   if (token) {
     await prisma.session.deleteMany({ where: { token } }); // idempotent
   }
-  const res = NextResponse.redirect(new URL("/login", req.url), 303);
+  const proto = req.headers.get("x-forwarded-proto") ?? new URL(req.url).protocol.replace(":", "");
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? new URL(req.url).host;
+  const res = NextResponse.redirect(new URL("/login", `${proto}://${host}`), 303);
   res.cookies.delete(SESSION_COOKIE);
   return res;
 }
