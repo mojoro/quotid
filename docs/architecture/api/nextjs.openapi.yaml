@@ -76,33 +76,27 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/LoginRequest' }
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
       responses:
-        '204':
+        '303':
           description: |
-            Session established. `Set-Cookie: quotid_session=...` is set on
-            this response. Body is empty.
+            Login outcome. Browser follows the `Location` header.
+            On success, the response carries `Set-Cookie: quotid_session=...` and
+            Location is `/journal-entries` (or the `next` query param if provided).
+            On failure (invalid passcode, missing field, no user, rate-limited),
+            Location is `/login?error=<code>` where `<code>` is one of
+            `invalid` | `missing` | `no-user` | `rate-limited`.
           headers:
             Set-Cookie:
               schema:
                 type: string
                 example: 'quotid_session=abc123...; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000'
-        '401':
-          description: Passcode does not match.
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetails' }
-        '429':
-          description: Too many failed attempts.
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetails' }
-          headers:
-            Retry-After:
+              description: Present only on success.
+            Location:
               schema:
-                type: integer
-                description: Seconds to wait before retrying.
-        default:
-          $ref: '#/components/responses/ProblemResponse'
+                type: string
+                example: '/journal-entries'
 
   /auth/logout:
     post:
