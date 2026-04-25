@@ -7,9 +7,13 @@
 
 ## First thing fresh Claude should say
 
-> Read `docs/SESSION_HANDOFF.md` end-to-end. **Design phase is complete (Steps 1–6 + auth spec).** Step 4's known gap (auth login/logout Route Handlers) is closed. Day 3 is scaffolding work: Docker Compose + Caddyfile + Next.js 16 init + Pipecat FastAPI skeleton + Python Temporal worker + `prisma migrate dev`. Open infra task: confirm Oracle A1 capacity in US East (Ashburn) — provisioning may need retries.
+> Read `docs/SESSION_HANDOFF.md` end-to-end. **Design phase is complete (Steps 1–6 + auth spec).** Step 4's known gap (auth login/logout Route Handlers) is closed. We are **mid-way through pre-implementation grilling** (the `grill-me` pattern: one question at a time, with my recommendation, walking the decision tree before writing the Day 3 plan). The last question asked, **paused awaiting your answer**, is:
+>
+> **Question 1 — scaffolding strategy: A) horizontal layers vs B) vertical slice?** My recommendation was **B**, with slice 1 = "login lands you on `/journal-entries` (empty list rendered server-side)". Reply **A** or **B** to proceed; further questions follow one-by-one until we have enough decisions to write the actual Day 3 implementation plan. Open infra task in parallel: confirm Oracle A1 capacity in US East (Ashburn) — provisioning may need retries.
 
-If the user says "just proceed," assume interpretation **C** for WhatsApp (meeting medium, not product integration) and **US East (Ashburn)** as the Oracle home region (both confirmed in session 3).
+If the user says "just proceed," assume interpretation **C** for WhatsApp (meeting medium, not product integration), **US East (Ashburn)** as the Oracle home region (both confirmed in session 3), and **B (vertical slice)** for the scaffolding strategy.
+
+**Tooling note for fresh Claude:** the `grill-me` skill (`mattpocock/skills@grill-me`, installed at `~/.agents/skills/grill-me/`) drives this pattern. Auto-discovery should pick it up; if it doesn't appear, follow the pattern manually — interview the user relentlessly about every aspect of the plan until shared understanding, walk the design tree, ask questions one at a time, provide your recommended answer for each, and explore the codebase rather than asking when a question can be answered that way.
 
 ---
 
@@ -250,23 +254,44 @@ quotid/
 
 ---
 
-**Session 2 commits:** steps 3–5 docs, api/ directory, likec4 bug fix, gitignore, this handoff update. All in one atomic commit (`8293f96`).
+**Session 2 commits:** steps 3–5 docs, api/ directory, likec4 bug fix, gitignore, prior handoff update. All in one bundled commit (`8293f96`). That commit's bundling and `Co-Authored-By` footer **violate** the commit-style rules now in force (see "Commit style" below) but are baseline debt; not rewriting upstream of `8293f96`.
 
-**Session 3 changes (uncommitted as of writing):**
-- `docs/architecture/transcription-interface.md` — Step 6 design doc (new); §7 fallback policy = option (a) silent skip + structured warning log; §5.3 `recording_url` gap marked resolved.
-- `prisma/schema.prisma` — added `User.passcodeHash`, new `Session` model with `(token, userId, expiresAt)`.
-- `docs/architecture/api/nextjs.openapi.yaml` — added `POST /auth/login` and `POST /auth/logout` paths, `LoginRequest` schema, `auth` tag.
-- `docs/architecture/api/README.md` — auth rows added to the auth/authz table; changelog entry for 2026-04-25.
-- `docs/architecture/temporal-workflow.md` — audit fixes: §7 preamble (minute → second precision); §4 schedule client clarified as TypeScript `@temporalio/client` running in Next.js; `CallOutcome.recording_url` field added (§3.1); `sync_schedule` reclassified from "activity" to "service function in TS server action."
-- `docs/architecture/pipecat-pipeline.md` — `TranscriptAccumulator.build_outcome` is now async and fetches the recording URL from Twilio at pipeline end; `bot.py` skeleton updated accordingly.
-- `docs/SESSION_HANDOFF.md` — this file, refreshed.
+**Session 3 commits (12 atomic, oldest → newest, all subject-only):**
+
+```
+39059a5  Add User.passcodeHash column
+089d72d  Add Session model
+fc46df7  Add auth tag to nextjs OpenAPI spec
+194b389  Spec POST /auth/login
+a262588  Spec POST /auth/logout
+f9a6d14  Add API README changelog entry for auth
+3c8aca0  Fix stale precision claim in temporal-workflow §7
+e411de7  Reframe schedule client as TypeScript in §4
+ea81d78  Add recording_url to CallOutcome
+727fa63  Reclassify sync_schedule as service function
+32b437d  Add Step 6 transcription-interface design doc
+cb4f6c2  Refresh session handoff (session 3)
+```
+
+A 13th commit will land for *this* handoff refresh after the restart guidance lines were added.
+
+Branch is **12+ ahead of `origin/main` and unpushed**. Per global rule "do not push unless explicitly asked," fresh Claude should NOT push without confirmation.
 
 **Soft inconsistencies (tracked, not blocking):**
 - `docs/architecture/likec4/quotid.c4` does not model `worker → deepgram` (would be needed only when `CANONICAL_TRANSCRIPT_ENABLED=true`; MVP ships Minimal). Add the relationship at the same time the flag is flipped.
 - `docs/architecture/erd.md` is stale — does not yet show `User.passcodeHash` or `Session`. Will regenerate on first `npx prisma generate` during Day 3 scaffolding.
 
-Recommended commit split (atomic, one logical change each):
-1. `prisma/schema.prisma` — auth schema (passcodeHash + Session model).
-2. `docs/architecture/transcription-interface.md` — Step 6 design.
-3. `docs/architecture/api/{nextjs.openapi.yaml,README.md}` — auth endpoint spec.
-4. `docs/SESSION_HANDOFF.md` — handoff refresh.
+## Commit style — DO NOT VIOLATE
+
+Subject-only, tutorial-grade granularity. **No commit body, ever.** No Conventional Commits prefix (`feat:`/`fix:`/`docs:` is **not** John's style). No `Co-Authored-By`. No AI attribution. Imperative subject; if you'd write more than ~1 bullet of body, the commit needs to be split.
+
+**Enforcement:** a `PreToolUse` hook at `~/.claude/hooks/no-commit-body.sh` (wired into `~/.claude/settings.json`) will **physically block** any `git commit` that uses multiple `-m` flags, a HEREDOC, `-F`, or newlines in the message. Don't try to circumvent it — it exists because John had to re-prompt this rule across many sessions.
+
+**Memory:** see `~/.claude/projects/-home-john-repos-quotid/memory/feedback_commit_style.md` for the full rule and split heuristics. The `MEMORY.md` index in the same directory loads automatically.
+
+## Tooling state at end of session 3
+
+- `grill-me` skill installed (`~/.agents/skills/grill-me/`); use it for pre-implementation interrogation.
+- `caveman:caveman-commit` skill is installed but **explicitly rejected** for John's commits — do NOT auto-invoke it when staging changes.
+- Caveman mode active for prose responses (terse, fragments OK); does NOT extend to code, security writeups, or commits.
+- Working tree clean as of this handoff write.
