@@ -5,8 +5,13 @@ export async function GET(req: NextRequest) {
   const userId = req.headers.get("x-user-id");
   if (!userId) return NextResponse.json({ status: 401 }, { status: 401 });
 
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000);
   const session = await prisma.callSession.findFirst({
-    where: { userId, status: { in: ["DIALING", "IN_PROGRESS"] } },
+    where: {
+      userId,
+      status: { in: ["DIALING", "IN_PROGRESS"] },
+      createdAt: { gte: cutoff },
+    },
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
