@@ -57,3 +57,4 @@ coverage
 
 # Playwright artifacts
 .playwright-mcp/
+quotid.zip
