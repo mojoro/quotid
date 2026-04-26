@@ -52,6 +52,8 @@ async def create_call(req: CreateCallRequest) -> CreateCallResponse:
         url=twiml_url,
         status_callback=status_callback_url,
         status_callback_event=["initiated", "ringing", "answered", "completed"],
+        record=True,
+        recording_channels="dual",
     )
 
     register(
