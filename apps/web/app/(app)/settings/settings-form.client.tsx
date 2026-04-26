@@ -209,8 +209,8 @@ export function VoicePickerStub() {
         );
       })}
       <p className="mt-1 text-[12px] text-ink-3 italic">
-        Backend doesn't store a voice preference yet — Pipecat hardcodes the
-        voice. Picker is illustrative.
+        Backend doesn&apos;t store a voice preference yet — Pipecat hardcodes
+        the voice. Picker is illustrative.
       </p>
     </div>
   );

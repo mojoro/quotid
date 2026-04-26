@@ -281,7 +281,7 @@ function MissedRow({
       />
       <div>
         <div className="font-display text-[16px] leading-[1.3] tracking-[-0.01em] text-ink-3 italic md:text-[19px]">
-          We tried, but couldn't reach you.
+          We tried, but couldn&apos;t reach you.
         </div>
         <div className="mt-1 flex items-center gap-2 text-[13px] text-ink-3">
           <span className="inline-flex items-center gap-1.5 rounded-full border border-transparent bg-cool-soft px-2 py-0.5 text-[11px] tracking-[0.04em] text-cool">

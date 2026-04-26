@@ -71,7 +71,7 @@ export function StatusCard({ schedule, phoneNumber, timezone }: Props) {
             {dialing ? "Your phone should ring in a moment" : "Tonight's check-in is happening"}
           </div>
           <div className="mt-2 text-sm text-ink-3">
-            {phoneNumber} · Pick up when you're ready
+            {phoneNumber} · Pick up when you&apos;re ready
           </div>
         </div>
         <button

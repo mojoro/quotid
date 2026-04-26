@@ -35,6 +35,7 @@ export function Sidebar({ email, initials }: Props) {
   const [dark, setDark] = useState(false);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDark(document.documentElement.classList.contains("dark"));
   }, []);
 
@@ -66,77 +67,6 @@ export function Sidebar({ email, initials }: Props) {
 
   const activeRoute = LINKS.find((l) => pathname.startsWith(l.href));
 
-  const NavList = ({ onNavigate }: { onNavigate?: () => void }) => (
-    <ul role="list" className="m-0 flex list-none flex-col gap-0.5 p-0">
-      {LINKS.map((l) => {
-        const active = pathname.startsWith(l.href);
-        const Icn = l.Icon;
-        return (
-          <li key={l.href} className="m-0 p-0">
-            <Link
-              href={l.href}
-              onClick={onNavigate}
-              aria-current={active ? "page" : undefined}
-              className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-                active
-                  ? "bg-paper-2 text-ink"
-                  : "text-ink-2 hover:bg-paper-2 hover:text-ink"
-              }`}
-            >
-              <span aria-hidden="true">
-                <Icn size={16} />
-              </span>
-              <span>{l.label}</span>
-            </Link>
-          </li>
-        );
-      })}
-    </ul>
-  );
-
-  const Foot = () => (
-    <div className="mt-auto flex flex-col gap-2.5 border-t border-paper-3 px-2 pt-3.5 pb-1">
-      <div className="flex items-center gap-2.5 px-1">
-        <div className="grid h-6 w-6 place-items-center rounded-full bg-paper-3 text-[11px] font-semibold text-ink-2">
-          {initials}
-        </div>
-        <div className="min-w-0 flex-1 truncate text-xs text-ink-3" title={email}>
-          {email}
-        </div>
-      </div>
-      <div className="flex gap-1">
-        <button
-          type="button"
-          onClick={toggleTheme}
-          aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
-          aria-pressed={dark}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-transparent bg-transparent px-1.5 py-1.5 text-xs whitespace-nowrap text-ink-3 transition-colors hover:bg-paper-2 hover:text-ink"
-        >
-          {dark ? <IconSun size={14} /> : <IconMoon size={14} />}
-          <span>{dark ? "Light" : "Dark"}</span>
-        </button>
-        <button
-          type="button"
-          onClick={logout}
-          aria-label="Sign out"
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-transparent bg-transparent px-1.5 py-1.5 text-xs whitespace-nowrap text-ink-3 transition-colors hover:bg-paper-2 hover:text-ink"
-        >
-          <IconLogout size={14} />
-          <span>Log out</span>
-        </button>
-      </div>
-    </div>
-  );
-
-  const Brand = () => (
-    <div className="flex items-center gap-2.5 px-2 pt-1.5 pb-5">
-      <span className="inline-flex shrink-0 items-center justify-center text-accent" aria-hidden="true">
-        <QCordMark size={22} strokeWidth={28} />
-      </span>
-      <div className="font-display text-[22px] font-medium italic tracking-[-0.02em]">quotid</div>
-    </div>
-  );
-
   return (
     <>
       <aside
@@ -145,9 +75,15 @@ export function Sidebar({ email, initials }: Props) {
       >
         <Brand />
         <nav>
-          <NavList />
+          <NavList pathname={pathname} />
         </nav>
-        <Foot />
+        <Foot
+          email={email}
+          initials={initials}
+          dark={dark}
+          onToggleTheme={toggleTheme}
+          onLogout={logout}
+        />
       </aside>
 
       <header
@@ -204,13 +140,108 @@ export function Sidebar({ email, initials }: Props) {
             <Brand />
           </div>
           <nav className="flex-1 overflow-y-auto px-3 py-4">
-            <NavList onNavigate={() => setMobileOpen(false)} />
+            <NavList pathname={pathname} onNavigate={() => setMobileOpen(false)} />
           </nav>
           <div className="border-t border-paper-3 px-5 pt-4 pb-5.5">
-            <Foot />
+            <Foot
+              email={email}
+              initials={initials}
+              dark={dark}
+              onToggleTheme={toggleTheme}
+              onLogout={logout}
+            />
           </div>
         </div>
       </div>
     </>
+  );
+}
+
+function Brand() {
+  return (
+    <div className="flex items-center gap-2.5 px-2 pt-1.5 pb-5">
+      <span className="inline-flex shrink-0 items-center justify-center text-accent" aria-hidden="true">
+        <QCordMark size={22} strokeWidth={28} />
+      </span>
+      <div className="font-display text-[22px] font-medium italic tracking-[-0.02em]">quotid</div>
+    </div>
+  );
+}
+
+function NavList({ pathname, onNavigate }: { pathname: string; onNavigate?: () => void }) {
+  return (
+    <ul role="list" className="m-0 flex list-none flex-col gap-0.5 p-0">
+      {LINKS.map((l) => {
+        const active = pathname.startsWith(l.href);
+        const Icn = l.Icon;
+        return (
+          <li key={l.href} className="m-0 p-0">
+            <Link
+              href={l.href}
+              onClick={onNavigate}
+              aria-current={active ? "page" : undefined}
+              className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
+                active
+                  ? "bg-paper-2 text-ink"
+                  : "text-ink-2 hover:bg-paper-2 hover:text-ink"
+              }`}
+            >
+              <span aria-hidden="true">
+                <Icn size={16} />
+              </span>
+              <span>{l.label}</span>
+            </Link>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function Foot({
+  email,
+  initials,
+  dark,
+  onToggleTheme,
+  onLogout,
+}: {
+  email: string;
+  initials: string;
+  dark: boolean;
+  onToggleTheme: () => void;
+  onLogout: () => void;
+}) {
+  return (
+    <div className="mt-auto flex flex-col gap-2.5 border-t border-paper-3 px-2 pt-3.5 pb-1">
+      <div className="flex items-center gap-2.5 px-1">
+        <div className="grid h-6 w-6 place-items-center rounded-full bg-paper-3 text-[11px] font-semibold text-ink-2">
+          {initials}
+        </div>
+        <div className="min-w-0 flex-1 truncate text-xs text-ink-3" title={email}>
+          {email}
+        </div>
+      </div>
+      <div className="flex gap-1">
+        <button
+          type="button"
+          onClick={onToggleTheme}
+          aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
+          aria-pressed={dark}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-transparent bg-transparent px-1.5 py-1.5 text-xs whitespace-nowrap text-ink-3 transition-colors hover:bg-paper-2 hover:text-ink"
+        >
+          {dark ? <IconSun size={14} /> : <IconMoon size={14} />}
+          <span>{dark ? "Light" : "Dark"}</span>
+        </button>
+        <button
+          type="button"
+          onClick={onLogout}
+          aria-label="Sign out"
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-transparent bg-transparent px-1.5 py-1.5 text-xs whitespace-nowrap text-ink-3 transition-colors hover:bg-paper-2 hover:text-ink"
+        >
+          <IconLogout size={14} />
+          <span>Log out</span>
+        </button>
+      </div>
+    </div>
   );
 }
