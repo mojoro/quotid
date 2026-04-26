@@ -3,7 +3,8 @@ import { prisma } from "@/lib/db";
 import { currentUserId } from "@/lib/auth";
 import { EntryEditor } from "@/components/journal/entry-editor.client";
 import { RecordingPlayer } from "@/components/journal/recording-player.client";
-import { Transcript, segmentsToTurns } from "@/components/journal/transcript.client";
+import { Transcript } from "@/components/journal/transcript.client";
+import { segmentsToTurns } from "@/lib/transcript";
 import { fmtDuration, fmtLong, fmtTimeOfDay } from "@/lib/format";
 
 export default async function EntryDetailPage({
