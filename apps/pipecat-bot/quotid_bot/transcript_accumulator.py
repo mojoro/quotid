@@ -66,6 +66,19 @@ class TranscriptAccumulator(FrameProcessor):
         except Exception:
             recording_url = None
 
+        started_at = None
+        ended_at = None
+        duration_seconds = None
+        try:
+            call = await asyncio.to_thread(
+                twilio_client.calls(twilio_call_sid).fetch
+            )
+            started_at = call.start_time.isoformat() if call.start_time else None
+            ended_at = call.end_time.isoformat() if call.end_time else None
+            duration_seconds = int(call.duration) if call.duration else None
+        except Exception:
+            pass
+
         return {
             "status": "COMPLETED",
             "call_session_id": call_session_id,
@@ -73,6 +86,9 @@ class TranscriptAccumulator(FrameProcessor):
             "transcript_text": transcript_text,
             "transcript_segments": all_segments,
             "recording_url": recording_url,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_seconds": duration_seconds,
         }
 
     def _assistant_segments_from_context(self) -> list[Segment]:
