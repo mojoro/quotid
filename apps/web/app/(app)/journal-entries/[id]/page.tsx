@@ -34,7 +34,7 @@ export default async function EntryDetailPage({
     }),
     prisma.user.findUnique({
       where: { id: userId },
-      select: { email: true },
+      select: { email: true, name: true },
     }),
   ]);
 
@@ -44,9 +44,7 @@ export default async function EntryDetailPage({
   const turns = segmentsToTurns(segments as never);
   const duration = entry.callSession?.durationSeconds ?? null;
   const startedAt = entry.callSession?.startedAt ?? null;
-  const userLabel = user.email.split("@")[0].split(/[._-]/)[0];
-  const userLabelDisplay =
-    userLabel.charAt(0).toUpperCase() + userLabel.slice(1);
+  const userLabelDisplay = displayName(user.name, user.email);
 
   const eyebrowParts = [
     fmtLong(entry.entryDate),
@@ -78,4 +76,13 @@ export default async function EntryDetailPage({
       <div className="h-20" />
     </div>
   );
+}
+
+function displayName(name: string | null, email: string): string {
+  if (name && name.trim()) {
+    const first = name.trim().split(/\s+/)[0];
+    return first.charAt(0).toUpperCase() + first.slice(1);
+  }
+  const slug = email.split("@")[0].split(/[._-]/)[0];
+  return slug.charAt(0).toUpperCase() + slug.slice(1);
 }
