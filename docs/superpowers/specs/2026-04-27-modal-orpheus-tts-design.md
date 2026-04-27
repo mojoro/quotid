@@ -12,7 +12,7 @@ The portfolio framing is "I built a Modal-hosted self-hosted-LLM TTS path; here'
 
 ## Goals
 
-1. Stand up Orpheus 3B (`canopylabs/orpheus-3b-0.1-ft`, Apache 2.0) as a Modal service on L4 GPU with scale-to-zero.
+1. Stand up Orpheus 3B (`canopylabs/orpheus-tts-0.1-finetune-prod`, Apache 2.0) as a Modal service on L4 GPU with scale-to-zero, served via the official `orpheus_tts` Python package (vLLM-backed; bundles SNAC decoding).
 2. Implement a pipecat `TTSService` subclass that streams PCM audio chunks from the Modal endpoint into the existing pipeline.
 3. Gate the swap on a single env var so production deployment is untouched until the flag is flipped.
 4. Document the cold-start trade-off and emotion-tag steerability as the talking points the experiment was built to demonstrate.
@@ -49,33 +49,42 @@ The portfolio framing is "I built a Modal-hosted self-hosted-LLM TTS path; here'
 
 **1. `modal_app/orpheus_tts/` — separate uv project, separate `pyproject.toml`**
 
-A standalone Modal app, deliberately not inside `apps/pipecat-bot` so it doesn't pull in pipecat's deps. Owns its own dep tree (Modal SDK, transformers, snac decoder, torch).
+A standalone Modal app, deliberately not inside `apps/pipecat-bot` so it doesn't pull in pipecat's deps. Owns its own dep tree (Modal SDK, `orpheus_tts`, vLLM, torch). The `orpheus_tts` package wraps tokenization, vLLM-backed generation, and SNAC decoding behind a single streaming generator — so the Modal service code is thin glue.
 
 ```
 modal_app/orpheus_tts/
-├── pyproject.toml               # Modal + ML deps only
+├── pyproject.toml               # Modal + orpheus_tts deps only
 ├── README.md                    # deploy/test/cost notes; emotion-tag vocabulary
-├── orpheus_tts/
+├── orpheus_tts_app/
 │   ├── __init__.py
 │   └── app.py                   # Modal Cls, FastAPI endpoint
 └── scripts/
     └── smoke_test.py            # POST sample text, save WAV locally
 ```
 
+(The local Python package is named `orpheus_tts_app` to avoid colliding with the `orpheus_tts` PyPI package it imports.)
+
 **Modal `Cls` shape:**
 
-- `@modal.enter()`: load Orpheus 3B + SNAC decoder weights into GPU memory; warmup pass on a 5-token prompt to compile CUDA graphs.
-- `@modal.method()` `synthesize(text: str, voice: str) -> AsyncGenerator[bytes]`: tokenize, generate audio tokens autoregressively, decode SNAC frames as they arrive, yield PCM chunks (~50-100ms of audio each).
+- `@modal.enter()`: instantiate `OrpheusModel(model_name="canopylabs/orpheus-tts-0.1-finetune-prod")`. The class loads weights into GPU and warms vLLM internally; one optional warmup `generate_speech` call on a 3-word prompt compiles CUDA graphs.
+- `@modal.method()` `synthesize(text: str, voice: str) -> AsyncGenerator[bytes]`: calls `model.generate_speech(prompt=text, voice=voice, repetition_penalty=1.1)` and yields each chunk it produces (chunks are already PCM 16-bit @ 24 kHz from the package).
 - `@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)` `/synthesize`: thin wrapper that calls the method and returns `StreamingResponse(media_type="application/octet-stream")`.
-- Container config: `gpu="L4"`, `min_containers=0`, `scaledown_window=120`, `timeout=300`, `image=modal.Image.debian_slim().pip_install(...)`.
+- Container config: `gpu="L4"`, `min_containers=0`, `scaledown_window=120`, `timeout=300`, `image=modal.Image.debian_slim().pip_install("orpheus-tts", "fastapi[standard]")`.
+- **GPU sizing fallback:** If L4 (24 GB) hits OOM or KV-cache pressure under vLLM at fp16 (3B params + concurrent decoding state can crowd L4), bump to **L40S** (48 GB, ~$1.90/hr active). Cost story stays trivial at demo volume; sizing is a runtime choice during smoke-testing.
 
 **2. `apps/pipecat-bot/quotid_bot/modal_orpheus_tts.py` — pipecat TTS service**
 
 Subclass of pipecat's `TTSService` base.
 
-- `run_tts(text, context_id)`: opens `httpx.AsyncClient.stream("POST", url, ...)`, yields `TTSStartedFrame` then iterates over chunks; each chunk yields a `TTSAudioRawFrame(audio=chunk, sample_rate=24000, num_channels=1)`; finishes with `TTSStoppedFrame`. Pipecat's transport handles the 24 kHz → 8 kHz resample for Twilio.
-- Auth headers: `Modal-Key` / `Modal-Secret` from config.
-- On HTTP error or stream failure: log error, yield `ErrorFrame`. No fallback to Aura — this path is opt-in via flag and the failure mode is part of the demo's honesty.
+- `run_tts(text, context_id)`: opens `httpx.AsyncClient.stream("POST", url, ...)`, yields the standard pipecat sequence:
+  1. `TTSStartedFrame()`
+  2. `TTSTextFrame(text)` — for context-tracking of what was actually spoken (LLMContext consumes this)
+  3. For each PCM chunk from the stream: `TTSAudioRawFrame(audio=chunk, sample_rate=24000, num_channels=1)`
+  4. `TTSStoppedFrame()`
+
+  Pipecat's transport handles the 24 kHz → 8 kHz resample for Twilio.
+- Auth headers: `Modal-Key` / `Modal-Secret` from config (Modal's standard proxy-auth header names).
+- On HTTP error or stream failure: log error, yield `ErrorFrame` (`pipecat.frames.frames.ErrorFrame`). No fallback to Aura — this path is opt-in via flag and the failure mode is part of the demo's honesty.
 - On `cancel()`: close the stream cleanly so Modal's container can scale down.
 
 **3. `apps/pipecat-bot/quotid_bot/pipeline.py` — branch on flag**
@@ -177,9 +186,23 @@ Compared to Aura's ~$0.018/min × 10 min = $0.18 per same demo. Cost framing on 
 
 ## Open questions to resolve at planning time
 
-1. Modal proxy auth vs. a custom shared-secret header — Modal's built-in is simpler; confirm it works behind the bot's `httpx` setup.
-2. `snac` decoder version pinning — the Canopy reference uses a specific commit; mirror it.
-3. Whether to commit `modal_app/orpheus_tts/uv.lock` (yes — same convention as the rest of the repo).
-4. Whether to add a `make` or `just` target for `modal deploy` to keep the muscle-memory tight.
+1. Whether to commit `modal_app/orpheus_tts/uv.lock` (yes — same convention as the rest of the repo).
+2. Whether to add a `make` or `just` target for `modal deploy` to keep the muscle-memory tight.
+3. GPU tier confirmation — start on L4, bump to L40S during smoke-testing if vLLM KV-cache pressure or OOM appears. Decision made empirically, not in advance.
 
-These are wired-up details for the implementation plan, not architectural unknowns.
+Resolved during the audit pass:
+- Modal proxy auth (`requires_proxy_auth=True` + `Modal-Key`/`Modal-Secret` headers) is the standard pattern; no custom auth needed.
+- SNAC version pinning is moot — the `orpheus_tts` PyPI package owns the SNAC dependency internally.
+
+## Audit trail (2026-04-27)
+
+Spec was audited against current Modal, Pipecat, and Orpheus docs/source. Substantive changes vs. the initial draft:
+
+- **Model checkpoint name:** `canopylabs/orpheus-tts-0.1-finetune-prod` (Canopy SDK's production checkpoint), not `canopylabs/orpheus-3b-0.1-ft` (the HF-only mirror).
+- **Inference path:** use the `orpheus_tts` PyPI package (vLLM-backed, includes SNAC) instead of hand-rolling tokenize + sample + decode. Eliminates SNAC version-pinning concerns.
+- **Generation kwarg:** `repetition_penalty=1.1` is required for stable generations per Canopy.
+- **GPU sizing:** L4 stays the default with an L40S fallback documented for KV-cache pressure.
+- **Pipecat frame sequence:** added `TTSTextFrame` to the yield order so `LLMContext` properly tracks what was spoken.
+- **Local package name:** the in-repo Python package is `orpheus_tts_app` to avoid shadowing the PyPI `orpheus_tts` import.
+
+Confirmed unchanged: Modal's `requires_proxy_auth` / `Modal-Key`/`Modal-Secret` pattern; `@modal.enter()` + `@modal.method()` + `@modal.fastapi_endpoint()` shape; `min_containers` and `scaledown_window` keyword names; `StreamingResponse` for chunked binary; pipecat's native-rate output convention; voice list and emotion-tag vocabulary.
