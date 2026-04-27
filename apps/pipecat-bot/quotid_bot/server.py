@@ -12,7 +12,14 @@ from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client as TwilioClient
 
 from .config import CONFIG
-from .correlation import CallCorrelation, lookup, register, remove
+from .correlation import (
+    CallCorrelation,
+    lookup,
+    lookup_collector,
+    register,
+    register_collector,
+    remove,
+)
 from .pipeline import build_pipeline
 from .temporal_completion import complete_await_call, fail_await_call
 from .twilio_signature import verify
@@ -83,6 +90,57 @@ async def create_call(req: CreateCallRequest) -> CreateCallResponse:
     )
     logger.info(f"Created Twilio call {call.sid} for workflow {req.workflow_id}")
     return CreateCallResponse(twilio_call_sid=call.sid)
+
+
+# ─── GET /calls/{call_sid}/transcript ──────────────────────────────────────
+# Internal-only (Caddy 403s public access). Returns the in-memory chronological
+# transcript so the live-call UI can poll for what's been said so far.
+
+class TranscriptSegment(BaseModel):
+    speaker: str
+    text: str
+
+
+class LiveTranscriptResponse(BaseModel):
+    segments: list[TranscriptSegment]
+
+
+@app.get(
+    "/calls/{call_sid}/transcript",
+    response_model=LiveTranscriptResponse,
+)
+async def live_transcript(call_sid: str) -> LiveTranscriptResponse:
+    collector = lookup_collector(call_sid)
+    if collector is None:
+        # Pipeline not yet started OR call already finalized. Either way, no
+        # in-memory transcript to return — caller can fall back to the DB.
+        return LiveTranscriptResponse(segments=[])
+    return LiveTranscriptResponse(
+        segments=[
+            TranscriptSegment(speaker=s.speaker, text=s.text) for s in collector.segments
+        ]
+    )
+
+
+# ─── POST /calls/{call_sid}/end ────────────────────────────────────────────
+# Internal-only. Asks Twilio to hang up the active call. Twilio sends the
+# "completed" status callback shortly after, and the bot's WSS
+# `on_client_disconnected` handler tears down the pipeline normally.
+
+@app.post("/calls/{call_sid}/end", status_code=202)
+async def end_call(call_sid: str) -> dict:
+    if lookup(call_sid) is None:
+        raise HTTPException(status_code=404, detail="unknown call_sid")
+    try:
+        await asyncio.to_thread(
+            twilio.calls(call_sid).update, status="completed"
+        )
+    except TwilioRestException as e:
+        status_code = e.status if isinstance(e.status, int) and 400 <= e.status < 600 else 502
+        logger.warning(f"Twilio refused to end call {call_sid}: {e.msg}")
+        raise HTTPException(status_code=status_code, detail=str(e.msg or e))
+    logger.info(f"Hung up Twilio call {call_sid} on user request")
+    return {"ok": True}
 
 
 # ─── GET/POST /calls/{call_session_id}/twiml ─────────────────────────────────
@@ -168,6 +226,7 @@ async def stream(websocket: WebSocket, call_session_id: str) -> None:
         voice=corr.voice,
         user_name=corr.user_name,
     )
+    register_collector(call_sid, collector)
 
     runner = PipelineRunner(handle_sigint=False)
 
