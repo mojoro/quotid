@@ -32,12 +32,14 @@ export async function GET(
     return new Response(null, { status: upstream.status });
   }
 
-  return new Response(upstream.body, {
-    status: 200,
-    headers: {
-      "Content-Type": upstream.headers.get("content-type") ?? "audio/mpeg",
-      "Content-Length": upstream.headers.get("content-length") ?? "",
-      "Cache-Control": "private, max-age=3600",
-    },
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": upstream.headers.get("content-type") ?? "audio/mpeg",
+    "Cache-Control": "private, max-age=3600",
+  };
+  const contentLength = upstream.headers.get("content-length");
+  if (contentLength) headers["Content-Length"] = contentLength;
+  const acceptRanges = upstream.headers.get("accept-ranges");
+  if (acceptRanges) headers["Accept-Ranges"] = acceptRanges;
+
+  return new Response(upstream.body, { status: 200, headers });
 }
