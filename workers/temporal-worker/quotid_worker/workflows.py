@@ -1,8 +1,10 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 with workflow.unsafe.imports_passed_through():
     from .activities import (
@@ -54,11 +56,19 @@ class JournalingWorkflow:
     async def run(self, inp: JournalingWorkflowInput) -> str | None:
         wf_id = workflow.info().workflow_id
 
+        # Temporal Schedule firings pass `scheduled_for: epoch` because the
+        # Schedule's static args template can't reference the actual fire
+        # time. Substitute the real time when we detect that sentinel so DB
+        # rows + summary prompts get sensible dates.
+        scheduled_for = (
+            inp.scheduled_for if inp.scheduled_for > _EPOCH else workflow.now()
+        )
+
         session = await workflow.execute_activity(
             create_call_session,
             CreateCallSessionInput(
                 user_id=inp.user_id,
-                scheduled_for=inp.scheduled_for,
+                scheduled_for=scheduled_for,
                 workflow_id=wf_id,
             ),
             start_to_close_timeout=timedelta(seconds=10),
@@ -137,7 +147,7 @@ class JournalingWorkflow:
             SummarizeInput(
                 transcript_text=outcome.transcript_text or "",
                 user_timezone="UTC",
-                entry_date=inp.scheduled_for.date().isoformat(),
+                entry_date=scheduled_for.date().isoformat(),
             ),
             start_to_close_timeout=timedelta(minutes=2),
             retry_policy=_SUMMARIZE_RETRY,
