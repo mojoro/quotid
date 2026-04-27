@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { currentUserId } from "@/lib/auth";
-import { ScheduleForm, VoicePickerStub } from "./settings-form.client";
+import { ProfileForm, ScheduleForm, VoicePicker } from "./settings-form.client";
 
 export default async function SettingsPage() {
   const userId = await currentUserId();
@@ -8,11 +8,17 @@ export default async function SettingsPage() {
   const [user, schedule] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
-      select: { email: true, phoneNumber: true, timezone: true },
+      select: {
+        email: true,
+        name: true,
+        phoneNumber: true,
+        timezone: true,
+        voicePreference: true,
+      },
     }),
     prisma.callSchedule.findUnique({
       where: { userId },
-      select: { enabled: true, localTimeOfDay: true },
+      select: { enabled: true, localTimeOfDay: true, daysOfWeek: true },
     }),
   ]);
 
@@ -20,6 +26,7 @@ export default async function SettingsPage() {
 
   const initialEnabled = schedule?.enabled ?? false;
   const initialTime = schedule?.localTimeOfDay ?? "21:00";
+  const initialDays = schedule?.daysOfWeek ?? 0b1111111;
 
   return (
     <div style={{ animation: "var(--animate-route-in)" }}>
@@ -31,10 +38,20 @@ export default async function SettingsPage() {
       </h1>
 
       <section className="mt-12">
+        <h2 className="font-display text-[28px] tracking-[-0.01em]">Profile</h2>
+        <ProfileForm
+          initialName={user.name}
+          initialPhone={user.phoneNumber}
+          initialTimezone={user.timezone}
+        />
+      </section>
+
+      <section className="mt-14">
         <h2 className="font-display text-[28px] tracking-[-0.01em]">Nightly call</h2>
         <ScheduleForm
           initialEnabled={initialEnabled}
           initialTime={initialTime}
+          initialDaysOfWeek={initialDays}
           timezone={user.timezone}
         />
       </section>
@@ -42,27 +59,12 @@ export default async function SettingsPage() {
       <section className="mt-14">
         <h2 className="font-display text-[28px] tracking-[-0.01em]">Account</h2>
 
-        <Row
-          label="Phone number"
-          hint="The number Quotid will call. Verified."
-          flag="Edit endpoint not implemented — display only."
-        >
-          <ReadonlyField value={user.phoneNumber} />
-        </Row>
-
-        <Row
-          label="Email"
-          hint="For login and recovery."
-          flag="Edit endpoint not implemented — display only."
-        >
+        <Row label="Email" hint="For login and recovery." flag="Edit endpoint not implemented — display only.">
           <ReadonlyField value={user.email} />
         </Row>
 
-        <Row
-          label="Voice"
-          hint="Pick the agent voice you'll hear."
-        >
-          <VoicePickerStub />
+        <Row label="Voice" hint="Pick the agent voice you'll hear. Hit Preview to listen.">
+          <VoicePicker initial={user.voicePreference} />
         </Row>
 
         <Row
