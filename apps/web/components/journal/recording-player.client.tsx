@@ -84,7 +84,7 @@ export function RecordingPlayer({ src, initialDuration }: Props) {
     <div
       role="region"
       aria-label="Recording playback"
-      className="mt-9 grid grid-cols-[auto_1fr_auto] items-center gap-4 rounded-[18px] border border-paper-3 bg-paper-2 px-4.5 py-4 max-md:grid-cols-[auto_1fr] max-md:[grid-template-areas:'btn_wave''time_time'] max-md:gap-y-2.5"
+      className="mt-9 grid grid-cols-[auto_1fr_auto] [grid-template-areas:'btn_wave_time'] items-center gap-4 rounded-[18px] border border-paper-3 bg-paper-2 px-4.5 py-4 max-md:grid-cols-[auto_1fr] max-md:[grid-template-areas:'btn_wave''time_time'] max-md:gap-y-2.5"
     >
       <audio ref={audioRef} src={src} preload="metadata" className="hidden" />
       <button
