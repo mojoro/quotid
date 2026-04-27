@@ -59,3 +59,6 @@ coverage
 # Playwright artifacts
 .playwright-mcp/
 quotid.zip
+
+# git worktrees
+.worktrees/
