@@ -105,6 +105,11 @@ class CreateCallSessionResult:
     call_session_id: str
     phone_number: str            # User.phone_number, E.164
     user_timezone: str           # carried forward to summarize prompt
+    voice: str                   # User.voicePreference, e.g. "aura-2-thalia-en".
+                                 # Threaded through to the bot for per-call TTS.
+    user_name: str | None        # User.name (nullable). Threaded through to the
+                                 # bot so the greeting + system prompt can address
+                                 # the caller by name.
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,8 @@ class InitiateCallInput:
     workflow_id: str             # Pipecat needs this for async-complete
     activity_id: str             # deterministic: f"await-call"
     to_phone: str                # E.164
+    voice: str                   # passed through to bot's POST /calls payload
+    user_name: str | None        # passed through to bot's POST /calls payload
 
 
 @dataclass(frozen=True)
@@ -180,14 +187,24 @@ async def sync_schedule(inp: SyncScheduleInput) -> None:
 
 @activity.defn
 async def create_call_session(inp: CreateCallSessionInput) -> CreateCallSessionResult:
-    """INSERT into `call_sessions` with status=PENDING. Returns enough context
-    for the remaining activities so they don't each need to re-query."""
+    """Read the user row, INSERT into `call_sessions` with status=PENDING,
+    and return enough context for the remaining activities so they don't
+    each need to re-query. The fields read from `User` are:
+      - phoneNumber (where to call)
+      - timezone    (passed to summarize for entry-date context)
+      - voicePreference (Deepgram Aura voice, threaded to bot)
+      - name        (nullable; threaded to bot for greeting + prompt)"""
 
 
 @activity.defn
 async def initiate_call(inp: InitiateCallInput) -> InitiateCallResult:
-    """POST /calls to the Pipecat server. Updates CallSession.status=DIALING
-    and stores twilio_call_sid. Returns the call SID."""
+    """POST /calls to the Pipecat server with payload:
+        {workflow_id, activity_id, call_session_id, phone_number,
+         voice, user_name}.
+    The bot stores `voice` and `user_name` on its in-process CallCorrelation
+    and uses them to construct the per-call pipeline once the WSS connects.
+    Updates CallSession.status=DIALING and stores twilio_call_sid. Returns
+    the call SID."""
 
 
 @activity.defn
@@ -310,7 +327,10 @@ class JournalingWorkflow:
             retry_policy=_DEFAULT_RETRY,
         )
 
-        # Step 2 — kick off the call
+        # Step 2 — kick off the call.
+        # `voice` and `user_name` ride through from create_call_session so the
+        # bot can construct the per-call pipeline with the user's preferred
+        # Aura voice and address them by name in the greeting + system prompt.
         await workflow.execute_activity(
             initiate_call,
             InitiateCallInput(
@@ -318,6 +338,8 @@ class JournalingWorkflow:
                 workflow_id=wf_id,
                 activity_id="await-call",      # deterministic, below
                 to_phone=session.phone_number,
+                voice=session.voice,
+                user_name=session.user_name,
             ),
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=_INITIATE_CALL_RETRY,
@@ -473,18 +495,28 @@ Twilio `statusCallback` fires on call lifecycle. The webhook is the safety net f
 └──────────┘        └────────────────────────────┘
                            │
                            │ 1. verify Twilio signature
-                           │ 2. SELECT call_sessions WHERE twilio_call_sid = ?
-                           │      → get workflow_id
-                           │ 3. if status ∈ {no-answer, failed, busy, canceled}:
+                           │ 2. branch on CallStatus:
+                           │
+                           │   ─ "in-progress" (answered):
+                           │       UPDATE call_sessions
+                           │         SET status='IN_PROGRESS',
+                           │             startedAt=NOW()
+                           │         WHERE twilioCallSid=? AND
+                           │               status IN ('DIALING','PENDING')
+                           │       (workflow not signalled — dashboard polls)
+                           │
+                           │   ─ "no-answer" / "failed" / "busy" / "canceled":
+                           │       SELECT call_sessions WHERE twilio_call_sid=?
+                           │         → workflow_id
                            ▼
                    ┌────────────────────────────┐
                    │ temporal_client            │
-                   │  .get_async_activity_handle│
-                   │     (workflow_id,          │
-                   │      "await-call")         │
-                   │  .complete(CallOutcome(    │
-                   │     status=NO_ANSWER,      │
-                   │     failure_reason=...))   │
+                   │  .activity.complete(       │
+                   │     {workflowId,           │
+                   │      activityId:           │
+                   │       "await-call"},       │
+                   │     {status: NO_ANSWER,    │
+                   │      failure_reason: ...}) │
                    └────────────────────────────┘
                            │
                            ▼
@@ -497,16 +529,27 @@ Twilio `statusCallback` fires on call lifecycle. The webhook is the safety net f
 - Temporal **`complete()` on an already-completed activity raises `AsyncActivityNotFoundError`** — the webhook swallows that, because it means Pipecat got there first, which is the happy path.
 - The Twilio `completed` status (normal hangup) is **not forwarded to Temporal** — we rely on Pipecat completing the activity with the full transcript. Only abnormal statuses trigger the watchdog path. This prevents a race where the webhook completes with a NO_ANSWER payload but Pipecat had a real transcript ready.
 
+**The `in-progress` ("answered") status is also handled, but not by completing the activity.** When Twilio reports `CallStatus=in-progress`, the webhook flips `CallSession.status` from `DIALING` (or `PENDING`) to `IN_PROGRESS` and stamps `startedAt = now()`. The workflow doesn't directly observe this — it's still blocked on `await_call` — but the row mutation is visible to the Next.js dashboard, which polls and flips the "Calling…" banner to "Live." This is an out-of-band side effect on shared state; the workflow trusts the eventual `complete()` from Pipecat (or a watchdog path) to drive its own progress.
+
 **Signature (Next.js Route Handler, TypeScript):**
 
 ```ts
 // app/api/webhooks/twilio/call-status/route.ts
-export async function POST(req: Request): Promise<Response> {
-  // 1. verify X-Twilio-Signature
-  // 2. parse form-encoded body → { CallSid, CallStatus, CallDuration }
-  // 3. lookup workflow_id from call_sessions by twilio_call_sid
-  // 4. if CallStatus in abnormal set: call Temporal client to complete activity
-  // 5. always return 200 fast (Twilio retries 5xx)
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  // 1. verify X-Twilio-Signature against externally-reconstructed URL
+  //    (x-forwarded-proto + x-forwarded-host — internal req.url is wrong
+  //    behind cloudflared/Caddy)
+  // 2. parse form-encoded body → { CallSid, CallStatus, CallDuration, ... }
+  // 3. branch:
+  //    - CallStatus="in-progress": flip CallSession to IN_PROGRESS,
+  //      stamp startedAt; do NOT signal Temporal (workflow stays in
+  //      await_call until normal end or abnormal-status path below)
+  //    - CallStatus in {"no-answer","failed","busy","canceled"}: lookup
+  //      workflow_id and call client.activity.complete with a NO_ANSWER
+  //      or FAILED outcome
+  //    - CallStatus="completed": no-op (Pipecat is the source of truth
+  //      for the transcript-bearing outcome)
+  // 4. always return 2xx fast (Twilio retries 5xx)
 }
 ```
 
