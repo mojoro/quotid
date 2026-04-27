@@ -65,19 +65,42 @@ class JournalingWorkflow:
             retry_policy=_DEFAULT_RETRY,
         )
 
-        await workflow.execute_activity(
-            initiate_call,
-            InitiateCallInput(
+        try:
+            await workflow.execute_activity(
+                initiate_call,
+                InitiateCallInput(
+                    call_session_id=session.call_session_id,
+                    workflow_id=wf_id,
+                    activity_id="await-call",
+                    to_phone=session.phone_number,
+                    voice=session.voice,
+                    user_name=session.user_name,
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_INITIATE_CALL_RETRY,
+            )
+        except ActivityError as e:
+            # Twilio rejected the call (4xx) or all retries exhausted (5xx).
+            # Skip await_call and route straight to handle_missed_call so the
+            # CallSession leaves PENDING rather than getting stuck there.
+            outcome = CallOutcome(
+                status=CallOutcomeStatus.FAILED,
                 call_session_id=session.call_session_id,
-                workflow_id=wf_id,
-                activity_id="await-call",
-                to_phone=session.phone_number,
-                voice=session.voice,
-                user_name=session.user_name,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=_INITIATE_CALL_RETRY,
-        )
+                twilio_call_sid="",
+                failure_reason=f"initiate_call: {type(e.cause).__name__ if e.cause else type(e).__name__}",
+            )
+            await workflow.execute_activity(
+                handle_missed_call,
+                StoreEntryInput(
+                    user_id=inp.user_id,
+                    call_session_id=session.call_session_id,
+                    outcome=outcome,
+                    summary=None,
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=_DEFAULT_RETRY,
+            )
+            return None
 
         try:
             outcome: CallOutcome = await workflow.execute_activity(
