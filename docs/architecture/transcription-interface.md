@@ -19,13 +19,15 @@ The MVP populates exactly one transcript row per `CallSession`, written by `stor
 
 | Row | `kind` | `provider` | Source |
 |---|---|---|---|
-| 1 | `REALTIME` | `DEEPGRAM` | Deepgram Nova-3 streaming, captured by the bot's `UserTranscriptCapture` + `AssistantTextCapture` frame processors writing into a shared `TranscriptCollector` during the call. Segments are `{speaker, text}` only (no timing) — see `pipecat-pipeline.md` §9. |
+| 1 | `REALTIME` | seeded by `stt_factory.make_stt()` (`pipecat-pipeline.md` §7.5) — currently `DEEPGRAM` (Nova-3-general) | Streaming STT, captured by the bot's `UserTranscriptCapture` + `AssistantTextCapture` frame processors writing into a shared `TranscriptCollector` during the call. The collector is constructed with `provider=stt_provider_label`; that label flows through `CallOutcome.transcript_provider` into the `Transcript.provider` column via `store_entry` — no longer hardcoded. Segments are `{speaker, text}` only (no timing) — see `pipecat-pipeline.md` §9. |
 
 Step 6 adds a **second, optional row** produced after the call ends:
 
 | Row | `kind` | `provider` | Source |
 |---|---|---|---|
 | 2 | `CANONICAL` | `DEEPGRAM` (MVP) → `WHISPERX` (future) | Batch transcription of the Twilio-hosted recording, run post-call |
+
+**Live-transcript polling is a distinct surface.** While a call is in progress, `GET /calls/{call_sid}/transcript` on the bot returns whatever segments the `TranscriptCollector` has accumulated so far (`pipecat-pipeline.md` §2.3). That endpoint is **transient and in-memory only** — it reads `_COLLECTORS[call_sid]` on the bot's in-process registry, returns `{segments: []}` once the call finalizes and the collector is removed, and is never persisted by itself. The persisted `Transcript` row written by `store_entry` after the call ends is the durable artifact; the polling endpoint exists purely to drive the live-call dashboard. The two surfaces share a producer (the same `TranscriptCollector.segments` list) but have different lifetimes and access patterns.
 
 ### 1.1 What "canonical" buys us
 
