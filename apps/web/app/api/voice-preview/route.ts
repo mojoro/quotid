@@ -7,6 +7,9 @@ const ALLOWED_VOICES = new Set([
   "aura-2-thalia-en",
   "aura-2-orion-en",
   "aura-2-luna-en",
+  "aura-2-aries-en",
+  "aura-2-draco-en",
+  "aura-2-iris-en",
 ]);
 
 export async function GET(req: NextRequest) {
