@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db";
 import { SESSION_COOKIE, findValidSession } from "@/lib/auth";
 
 const PUBLIC_PATHS = new Set<string>(["/login"]);
-const PUBLIC_PREFIXES = ["/api/auth/", "/api/webhooks/", "/_next", "/favicon"];
+const PUBLIC_PREFIXES = ["/api/auth/", "/api/webhooks/", "/_next", "/favicon", "/icon", "/apple-icon"];
 
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
