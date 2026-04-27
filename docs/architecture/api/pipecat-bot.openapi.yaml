@@ -8,11 +8,12 @@ info:
     endpoint (documented in `docs/architecture/api/README.md` §4 — WebSockets
     don't fit OpenAPI).
 
-    **Topology:** runs inside the Oracle VM's Docker network. Caddy exposes
-    `/calls/{call_sid}/twiml` and `/calls/{call_sid}/stream` publicly because
-    Twilio must reach them; `POST /calls` and `GET /calls/{call_sid}` are
-    internal-only (Caddy matcher blocks external access — see decision #14 in
-    `docs/SESSION_HANDOFF.md`).
+    **Topology:** runs inside the AWS Lightsail VM's Docker network. Caddy
+    exposes `/calls/{call_sid}/twiml` and `/calls/{call_sid}/stream` publicly
+    because Twilio must reach them; `POST /calls` and `GET /calls/{call_sid}`
+    are internal-only (Caddy matcher blocks external access — see the
+    Caddyfile and the "Caddy 403s public POST `/calls`" invariant in
+    `CLAUDE.md`).
 
     **Naming convention:** JSON property names use `snake_case` per Zalando
     guidelines. Path segments use kebab-case. `operationId` values use
@@ -22,9 +23,9 @@ info:
     url: https://github.com/your-username/quotid
 
 servers:
-  - url: http://pipecat-bot:8000
-    description: Docker-network internal URL (used by Temporal worker).
-  - url: https://quotid.example.com
+  - url: http://bot:8000
+    description: Docker-network internal URL (used by Temporal worker as `BOT_INTERNAL_URL`).
+  - url: https://v.quotid.johnmoorman.com
     description: Public URL via Caddy (only `/twiml` and `/stream` reachable).
 
 tags:
@@ -62,8 +63,11 @@ paths:
                   call_session_id: cs_01HR9VXYZ456
                   to_phone: '+14155551234'
       responses:
-        '201':
-          description: Call accepted by Twilio.
+        '202':
+          description: |
+            Call placed with Twilio. The Twilio call is dialing asynchronously;
+            the actual ringing/answering is observed via the Twilio status
+            callback webhook hitting the Next app.
           content:
             application/json:
               schema:
@@ -214,10 +218,10 @@ components:
 
     CreateCallResponse:
       type: object
-      required: [call_sid]
+      required: [twilio_call_sid]
       additionalProperties: false
       properties:
-        call_sid:
+        twilio_call_sid:
           type: string
           description: Twilio-assigned Call SID. Persisted to `call_sessions.twilio_call_sid`.
           pattern: '^CA[a-fA-F0-9]{32}$'
