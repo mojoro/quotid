@@ -137,8 +137,25 @@ class CallOutcomeStatus(str, Enum):
 class CallOutcome:
     status: CallOutcomeStatus
     call_session_id: str
+    twilio_call_sid: str               # populated by the bot from the Twilio API;
+                                       # empty string on workflow-side failure
+                                       # constructions (initiate_call rejection,
+                                       # await_call backstop) where there is no
+                                       # call SID to record.
     transcript_text: str | None        # present iff COMPLETED
     transcript_segments: list | None   # present iff COMPLETED
+    transcript_provider: str = "DEEPGRAM"
+                                       # Value of Prisma's TranscriptProvider enum.
+                                       # Seeded by the bot's `stt_factory.make_stt()`
+                                       # via `TranscriptCollector(provider=...)`
+                                       # (`pipecat-pipeline.md` §7.5, §9). Read by
+                                       # `store_entry` when writing the Transcript
+                                       # row's `provider` column. Default keeps
+                                       # backwards-compat for failure-path
+                                       # constructions in the workflow body that
+                                       # don't go through the bot's collector.
+    started_at: datetime | None        # bot fetches via twilio.calls(sid).fetch()
+    ended_at: datetime | None
     duration_seconds: int | None
     failure_reason: str | None         # present iff FAILED / NO_ANSWER
     recording_url: str | None          # present iff COMPLETED and recording succeeded.
@@ -247,13 +264,21 @@ async def summarize(inp: SummarizeInput) -> SummarizeResult:
 
 @activity.defn
 async def store_entry(inp: StoreEntryInput) -> None:
-    """Transactionally: INSERT journal_entries row, UPDATE CallSession
-    (status=COMPLETED, ended_at, duration_seconds, recording_url).
+    """Transactionally: UPSERT the REALTIME Transcript row, UPDATE
+    CallSession (status=COMPLETED, started_at, ended_at,
+    duration_seconds, recording_url, twilio_call_sid), and INSERT a
+    JournalEntry if a summary is present.
+
     `recording_url` is sourced from `inp.outcome.recording_url`,
     populated by Pipecat's `build_outcome` from
     `twilio.recordings.list(call_sid=...)`. May be None if the
     recording never landed (rare; canonical transcription will be
-    skipped in that case)."""
+    skipped in that case).
+
+    `Transcript.provider` is sourced from `inp.outcome.transcript_provider`,
+    not hardcoded. The bot is the source of truth for which STT actually
+    ran (seeded by `stt_factory.make_stt()` —
+    `pipecat-pipeline.md` §7.5)."""
 ```
 
 ### 3.2 Workflow body
@@ -309,18 +334,31 @@ _SUMMARIZE_RETRY = RetryPolicy(
 # degradation; revisit if summary-failure rate exceeds ~1%.
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 @workflow.defn(name="JournalingWorkflow")
 class JournalingWorkflow:
     @workflow.run
     async def run(self, inp: JournalingWorkflowInput) -> None:
         wf_id = workflow.info().workflow_id
 
+        # Step 0 — Temporal Schedule firings can't reference the actual fire
+        # time in their static args template, so the schedule passes
+        # `scheduled_for=epoch` as a sentinel. Substitute `workflow.now()`
+        # when we see it so DB rows + summary entry_date get sensible values.
+        # The manual-trigger path in `triggerTestCall` passes the real time
+        # and skips this branch.
+        scheduled_for = (
+            inp.scheduled_for if inp.scheduled_for > _EPOCH else workflow.now()
+        )
+
         # Step 1 — create DB row, capture phone + timezone
         session = await workflow.execute_activity(
             create_call_session,
             CreateCallSessionInput(
                 user_id=inp.user_id,
-                scheduled_for=inp.scheduled_for,
+                scheduled_for=scheduled_for,
                 workflow_id=wf_id,
             ),
             start_to_close_timeout=timedelta(seconds=10),
@@ -331,19 +369,50 @@ class JournalingWorkflow:
         # `voice` and `user_name` ride through from create_call_session so the
         # bot can construct the per-call pipeline with the user's preferred
         # Aura voice and address them by name in the greeting + system prompt.
-        await workflow.execute_activity(
-            initiate_call,
-            InitiateCallInput(
+        #
+        # Wrapped in try/except so a Twilio rejection (4xx → non-retryable
+        # `TwilioClientError`, or 5xx after retries exhaust) routes straight
+        # to `handle_missed_call`. Without this, the workflow would die with
+        # an unhandled `ActivityError`, leaving the CallSession stuck in
+        # PENDING. The bot's `POST /calls` forwards Twilio's HTTP status code
+        # via `TwilioRestException` handling (`pipecat-pipeline.md` §2.3) so
+        # `initiate_call` can classify retryability correctly.
+        try:
+            await workflow.execute_activity(
+                initiate_call,
+                InitiateCallInput(
+                    call_session_id=session.call_session_id,
+                    workflow_id=wf_id,
+                    activity_id="await-call",      # deterministic, below
+                    to_phone=session.phone_number,
+                    voice=session.voice,
+                    user_name=session.user_name,
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_INITIATE_CALL_RETRY,
+            )
+        except ActivityError as e:
+            outcome = CallOutcome(
+                status=CallOutcomeStatus.FAILED,
                 call_session_id=session.call_session_id,
-                workflow_id=wf_id,
-                activity_id="await-call",      # deterministic, below
-                to_phone=session.phone_number,
-                voice=session.voice,
-                user_name=session.user_name,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=_INITIATE_CALL_RETRY,
-        )
+                twilio_call_sid="",
+                failure_reason=(
+                    f"initiate_call: "
+                    f"{type(e.cause).__name__ if e.cause else type(e).__name__}"
+                ),
+            )
+            await workflow.execute_activity(
+                handle_missed_call,
+                StoreEntryInput(
+                    user_id=inp.user_id,
+                    call_session_id=session.call_session_id,
+                    outcome=outcome,
+                    summary=None,
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=_DEFAULT_RETRY,
+            )
+            return
 
         # Step 3 — wait for the call to end (async completion).
         # activity_id pinned so Pipecat AND the watchdog webhook can complete it
@@ -394,7 +463,7 @@ class JournalingWorkflow:
             SummarizeInput(
                 transcript_text=outcome.transcript_text,
                 user_timezone=session.user_timezone,
-                entry_date=inp.scheduled_for.date().isoformat(),
+                entry_date=scheduled_for.date().isoformat(),
             ),
             start_to_close_timeout=timedelta(minutes=2),
             retry_policy=_SUMMARIZE_RETRY,
@@ -527,7 +596,19 @@ Twilio `statusCallback` fires on call lifecycle. The webhook is the safety net f
 **Why this works without coordination:**
 - `activity_id` is deterministic (`"await-call"`) — the webhook constructs the handle from `(workflow_id, "await-call")` without needing DB state or a stored task token.
 - Temporal **`complete()` on an already-completed activity raises `AsyncActivityNotFoundError`** — the webhook swallows that, because it means Pipecat got there first, which is the happy path.
-- The Twilio `completed` status (normal hangup) is **not forwarded to Temporal** — we rely on Pipecat completing the activity with the full transcript. Only abnormal statuses trigger the watchdog path. This prevents a race where the webhook completes with a NO_ANSWER payload but Pipecat had a real transcript ready.
+- **The webhook is silent on `completed` unless AMD says machine.** Forwarding *every* `completed` to Temporal races against the bot's `complete_await_call` (which builds the full outcome — segments + Twilio metadata round-trips — and takes ~5–10 s). Twilio fires `completed` the instant the leg ends, before the bot finalizes; if the webhook unconditionally completed, it would stomp the bot's outcome with a NO_ANSWER and skip the journal entry.
+
+**Webhook decision matrix on `CallStatus`:**
+
+| `CallStatus` | `AnsweredBy` | Action |
+|---|---|---|
+| `in-progress` | any | UPDATE CallSession SET status='IN_PROGRESS', startedAt=NOW() WHERE status IN ('DIALING','PENDING'). Workflow not signalled — dashboard polls. |
+| `no-answer` / `failed` / `busy` / `canceled` | any | `client.activity.complete({...}, {NO_ANSWER \| FAILED, failure_reason: "twilio:<status>"})`. |
+| `completed` | `machine_*` / `fax` | `client.activity.complete({...}, {NO_ANSWER, failure_reason: "twilio:answered_by_<value>"})`. The `/twiml` handler returned `<Hangup/>` (`pipecat-pipeline.md` §2.2), so no WSS opened and the bot is not the authoritative completer for this call. |
+| `completed` | `human` / `unknown` / unset | **No-op.** The bot's WSS handler is authoritative — it'll complete the activity with the full transcript-bearing outcome. |
+| Any other status | any | No-op. |
+
+`busy` maps to `NO_ANSWER`; `canceled` maps to `FAILED` (see `STATUS_MAP` in the route handler). The `completed` no-op branch is the critical race-avoidance invariant — earlier versions raced on every `completed` event.
 
 **The `in-progress` ("answered") status is also handled, but not by completing the activity.** When Twilio reports `CallStatus=in-progress`, the webhook flips `CallSession.status` from `DIALING` (or `PENDING`) to `IN_PROGRESS` and stamps `startedAt = now()`. The workflow doesn't directly observe this — it's still blocked on `await_call` — but the row mutation is visible to the Next.js dashboard, which polls and flips the "Calling…" banner to "Live." This is an out-of-band side effect on shared state; the workflow trusts the eventual `complete()` from Pipecat (or a watchdog path) to drive its own progress.
 
@@ -540,15 +621,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   //    (x-forwarded-proto + x-forwarded-host — internal req.url is wrong
   //    behind cloudflared/Caddy)
   // 2. parse form-encoded body → { CallSid, CallStatus, CallDuration, ... }
-  // 3. branch:
+  // 3. branch (see decision matrix above):
   //    - CallStatus="in-progress": flip CallSession to IN_PROGRESS,
   //      stamp startedAt; do NOT signal Temporal (workflow stays in
   //      await_call until normal end or abnormal-status path below)
   //    - CallStatus in {"no-answer","failed","busy","canceled"}: lookup
   //      workflow_id and call client.activity.complete with a NO_ANSWER
   //      or FAILED outcome
-  //    - CallStatus="completed": no-op (Pipecat is the source of truth
-  //      for the transcript-bearing outcome)
+  //    - CallStatus="completed" AND AnsweredBy in {machine_*, fax}:
+  //      complete with NO_ANSWER (the /twiml handler hung up; bot is
+  //      not the authoritative completer for this call)
+  //    - CallStatus="completed" with human/unknown/unset AnsweredBy:
+  //      no-op (Pipecat WSS handler is the source of truth for the
+  //      transcript-bearing outcome and gets ~5–10s to finalize)
   // 4. always return 2xx fast (Twilio retries 5xx)
 }
 ```
