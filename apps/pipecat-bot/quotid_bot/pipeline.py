@@ -11,7 +11,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.services.deepgram.tts import DeepgramTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
@@ -21,6 +20,7 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from .config import CONFIG
+from .stt_factory import make_stt
 from .system_prompt import opening_line, system_prompt
 from .transcript_accumulator import (
     AssistantTextCapture,
@@ -60,7 +60,7 @@ def build_pipeline(
         ),
     )
 
-    stt = DeepgramSTTService(api_key=CONFIG.deepgram_api_key)
+    stt, stt_provider_label = make_stt()
 
     llm = OpenAILLMService(
         api_key=CONFIG.openrouter_api_key,
@@ -69,7 +69,7 @@ def build_pipeline(
     )
 
     tts = QuotidDeepgramTTSService(
-        api_key=CONFIG.deepgram_api_key,
+        api_key=CONFIG.tts_api_key,
         voice=voice or DEFAULT_VOICE,
     )
 
@@ -77,7 +77,9 @@ def build_pipeline(
         messages=[{"role": "system", "content": system_prompt(user_name)}]
     )
     greeting = opening_line(user_name)
-    collector = TranscriptCollector(opening_line=greeting)
+    collector = TranscriptCollector(
+        opening_line=greeting, provider=stt_provider_label
+    )
     user_capture = UserTranscriptCapture(collector)
     asst_capture = AssistantTextCapture(collector)
 
