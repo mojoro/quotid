@@ -33,7 +33,7 @@ class CreateCallRequest(BaseModel):
     workflow_id: str
     activity_id: str
     call_session_id: str
-    phone_number: str  # E.164
+    to_phone: str  # E.164 — destination of the outbound call (the user's phone)
     voice: str | None = None  # Deepgram Aura voice id; None falls back to bot default
     user_name: str | None = None  # Used in greeting + system prompt
 
@@ -49,7 +49,7 @@ async def create_call(req: CreateCallRequest) -> CreateCallResponse:
 
     call = await asyncio.to_thread(
         twilio.calls.create,
-        to=req.phone_number,
+        to=req.to_phone,
         from_=CONFIG.twilio_phone_number,
         url=twiml_url,
         status_callback=status_callback_url,

@@ -54,7 +54,7 @@ async def initiate_call(inp: InitiateCallInput) -> InitiateCallResult:
         "workflow_id": inp.workflow_id,
         "activity_id": inp.activity_id,
         "call_session_id": inp.call_session_id,
-        "phone_number": inp.to_phone,
+        "to_phone": inp.to_phone,
         "voice": inp.voice,
         "user_name": inp.user_name,
     }
