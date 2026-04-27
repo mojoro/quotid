@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { IconClose } from "@/components/icons";
 import { fmtDuration } from "@/lib/format";
 
@@ -16,14 +16,33 @@ type ActiveCall = {
 
 type ActiveResponse = { active: ActiveCall };
 
+type LiveSegment = { speaker: "user" | "assistant"; text: string };
+type LiveTranscriptResponse = { segments: LiveSegment[] };
+
 async function fetchActive(): Promise<ActiveResponse> {
   const res = await fetch("/api/call-sessions/active", { credentials: "include" });
   if (!res.ok) throw new Error(`Active call fetch failed: ${res.status}`);
   return res.json();
 }
 
+async function fetchTranscript(sessionId: string): Promise<LiveTranscriptResponse> {
+  const res = await fetch(`/api/call-sessions/${sessionId}/transcript`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Transcript fetch failed: ${res.status}`);
+  return res.json();
+}
+
+async function endCall(sessionId: string): Promise<void> {
+  await fetch(`/api/call-sessions/${sessionId}/end`, {
+    method: "POST",
+    credentials: "include",
+  });
+}
+
 export function LiveCall() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: ["call-sessions", "active"],
     queryFn: fetchActive,
@@ -43,6 +62,15 @@ export function LiveCall() {
 
   const elapsedSec = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0;
 
+  const transcriptQuery = useQuery({
+    queryKey: ["call-sessions", "transcript", active?.id],
+    queryFn: () => fetchTranscript(active!.id),
+    enabled: phase === "in-progress" && !!active?.id,
+    refetchInterval: 1000,
+  });
+
+  const segments = transcriptQuery.data?.segments ?? [];
+
   useEffect(() => {
     if (isLoading) return;
     if (phase === "off") {
@@ -50,6 +78,24 @@ export function LiveCall() {
       return () => clearTimeout(t);
     }
   }, [phase, isLoading, router]);
+
+  const [ending, setEnding] = useState(false);
+  async function handleEnd() {
+    if (ending) return;
+    if (!active) {
+      router.push("/journal-entries");
+      return;
+    }
+    setEnding(true);
+    try {
+      await endCall(active.id);
+      // Twilio takes ~1s to fully tear down; force an active-call refetch so
+      // the route auto-dismisses as soon as the bot reports the call closed.
+      await queryClient.invalidateQueries({ queryKey: ["call-sessions", "active"] });
+    } finally {
+      setEnding(false);
+    }
+  }
 
   return (
     <div
@@ -62,11 +108,8 @@ export function LiveCall() {
       }}
     >
       <Head phase={phase} onMinimize={() => router.push("/journal-entries")} />
-      <Center phase={phase} elapsedSec={elapsedSec} />
-      <Foot
-        phase={phase}
-        onEnd={() => router.push("/journal-entries")}
-      />
+      <Center phase={phase} elapsedSec={elapsedSec} segments={segments} />
+      <Foot phase={phase} onEnd={handleEnd} ending={ending} />
     </div>
   );
 }
@@ -116,26 +159,90 @@ function Head({
 function Center({
   phase,
   elapsedSec,
+  segments,
 }: {
   phase: "off" | "dialing" | "in-progress";
   elapsedSec: number;
+  segments: LiveSegment[];
 }) {
   return (
-    <div className="flex flex-col items-center justify-center px-6 py-4 text-center">
-      <Orb phase={phase} />
-      <h1 className="m-0 font-display text-[clamp(28px,3vw,32px)] font-normal tracking-[-0.02em]" style={{ color: "oklch(96% 0.005 80 / 0.96)" }}>
-        Quotid
-      </h1>
-      <div
-        className="mt-1.5 font-mono text-[12px] tracking-[0.12em] tabular-nums uppercase"
-        style={{ color: "oklch(96% 0.005 80 / 0.5)" }}
-      >
-        {phase === "dialing"
-          ? "Dialing your phone…"
-          : phase === "in-progress"
-          ? `Connected · ${fmtDuration(elapsedSec)}`
-          : "Hanging up…"}
+    <div className="grid grid-rows-[auto_1fr] items-start gap-6 overflow-hidden px-6 py-4">
+      <div className="flex flex-col items-center text-center">
+        <Orb phase={phase} />
+        <h1
+          className="m-0 font-display text-[clamp(28px,3vw,32px)] font-normal tracking-[-0.02em]"
+          style={{ color: "oklch(96% 0.005 80 / 0.96)" }}
+        >
+          Quotid
+        </h1>
+        <div
+          className="mt-1.5 font-mono text-[12px] tracking-[0.12em] tabular-nums uppercase"
+          style={{ color: "oklch(96% 0.005 80 / 0.5)" }}
+        >
+          {phase === "dialing"
+            ? "Dialing your phone…"
+            : phase === "in-progress"
+            ? `Connected · ${fmtDuration(elapsedSec)}`
+            : "Hanging up…"}
+        </div>
       </div>
+      {phase === "in-progress" && <LiveTranscriptPane segments={segments} />}
+    </div>
+  );
+}
+
+function LiveTranscriptPane({ segments }: { segments: LiveSegment[] }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [segments.length]);
+
+  if (segments.length === 0) {
+    return (
+      <div
+        className="mx-auto flex max-w-[640px] items-center justify-center text-[13px] italic"
+        style={{ color: "oklch(96% 0.005 80 / 0.4)" }}
+      >
+        Waiting for the first thing to be said…
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={scrollRef}
+      className="mx-auto w-full max-w-[640px] overflow-y-auto rounded-[18px] border px-5 py-4"
+      style={{
+        borderColor: "oklch(96% 0.005 80 / 0.12)",
+        background: "oklch(96% 0.005 80 / 0.04)",
+      }}
+    >
+      {segments.map((s, i) => (
+        <div
+          key={i}
+          className="grid grid-cols-[64px_1fr] items-baseline gap-3 py-1.5"
+        >
+          <div
+            className="text-[10px] tracking-[0.12em] uppercase"
+            style={{
+              color:
+                s.speaker === "assistant"
+                  ? "oklch(82% 0.13 55)"
+                  : "oklch(96% 0.005 80 / 0.5)",
+            }}
+          >
+            {s.speaker === "assistant" ? "Quotid" : "You"}
+          </div>
+          <div
+            className="text-[14px] leading-[1.5] break-words"
+            style={{ color: "oklch(96% 0.005 80 / 0.92)" }}
+          >
+            {s.text}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -186,9 +293,11 @@ function Orb({ phase }: { phase: "off" | "dialing" | "in-progress" }) {
 function Foot({
   phase,
   onEnd,
+  ending,
 }: {
   phase: "off" | "dialing" | "in-progress";
   onEnd: () => void;
+  ending: boolean;
 }) {
   return (
     <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-6">
@@ -197,8 +306,9 @@ function Foot({
         <button
           type="button"
           onClick={onEnd}
+          disabled={ending}
           aria-label="Hang up"
-          className="inline-flex h-15 w-15 cursor-pointer items-center justify-center rounded-full border-none p-0 text-white transition-transform hover:-translate-y-0.5"
+          className="inline-flex h-15 w-15 cursor-pointer items-center justify-center rounded-full border-none p-0 text-white transition-transform hover:-translate-y-0.5 disabled:opacity-60"
           style={{
             width: 60,
             height: 60,
@@ -212,7 +322,7 @@ function Foot({
           className="font-mono text-[11px] tracking-[0.16em] uppercase"
           style={{ color: "oklch(96% 0.005 80 / 0.7)" }}
         >
-          End call
+          {ending ? "Hanging up…" : "End call"}
         </div>
       </div>
       <div />
