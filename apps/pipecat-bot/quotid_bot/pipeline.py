@@ -21,7 +21,7 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from .config import CONFIG
-from .system_prompt import OPENING_LINE, SYSTEM_PROMPT
+from .system_prompt import opening_line, system_prompt
 from .transcript_accumulator import TranscriptAccumulator
 
 
@@ -38,6 +38,7 @@ def build_pipeline(
     call_sid: str,
     *,
     voice: str | None = None,
+    user_name: str | None = None,
 ) -> tuple[PipelineTask, TranscriptAccumulator, LLMContext]:
     serializer = TwilioFrameSerializer(
         stream_sid=stream_sid,
@@ -68,7 +69,9 @@ def build_pipeline(
         voice=voice or DEFAULT_VOICE,
     )
 
-    context = LLMContext(messages=[{"role": "system", "content": SYSTEM_PROMPT}])
+    context = LLMContext(
+        messages=[{"role": "system", "content": system_prompt(user_name)}]
+    )
     accumulator = TranscriptAccumulator(context)
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -110,7 +113,7 @@ def build_pipeline(
 
     @transport.event_handler("on_client_connected")
     async def kick_off(_t, _client):
-        await task.queue_frames([TextFrame(OPENING_LINE)])
+        await task.queue_frames([TextFrame(opening_line(user_name))])
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnect(_t, _client):
