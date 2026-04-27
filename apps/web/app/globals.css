@@ -107,4 +107,29 @@
     outline-offset: 2px;
     border-radius: 4px;
   }
+
+}
+
+/* Scrollbars — single accent oval, transparent track. Site-wide.
+ * Outside @layer base so Tailwind doesn't strip the bare pseudo-element rules. */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-accent) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-accent);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-accent-ink);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
