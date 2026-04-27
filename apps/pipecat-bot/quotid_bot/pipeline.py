@@ -22,7 +22,11 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from .config import CONFIG
 from .system_prompt import opening_line, system_prompt
-from .transcript_accumulator import TranscriptAccumulator
+from .transcript_accumulator import (
+    AssistantTextCapture,
+    TranscriptCollector,
+    UserTranscriptCapture,
+)
 
 
 class QuotidDeepgramTTSService(DeepgramTTSService):
@@ -39,7 +43,7 @@ def build_pipeline(
     *,
     voice: str | None = None,
     user_name: str | None = None,
-) -> tuple[PipelineTask, TranscriptAccumulator, LLMContext]:
+) -> tuple[PipelineTask, TranscriptCollector, LLMContext]:
     serializer = TwilioFrameSerializer(
         stream_sid=stream_sid,
         call_sid=call_sid,
@@ -73,7 +77,9 @@ def build_pipeline(
         messages=[{"role": "system", "content": system_prompt(user_name)}]
     )
     greeting = opening_line(user_name)
-    accumulator = TranscriptAccumulator(context, opening_line=greeting)
+    collector = TranscriptCollector(opening_line=greeting)
+    user_capture = UserTranscriptCapture(collector)
+    asst_capture = AssistantTextCapture(collector)
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
@@ -94,9 +100,10 @@ def build_pipeline(
     pipeline = Pipeline([
         transport.input(),
         stt,
-        accumulator,
+        user_capture,
         user_aggregator,
         llm,
+        asst_capture,
         tts,
         transport.output(),
         assistant_aggregator,
@@ -120,4 +127,4 @@ def build_pipeline(
     async def on_disconnect(_t, _client):
         await task.cancel()
 
-    return task, accumulator, context
+    return task, collector, context

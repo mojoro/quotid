@@ -148,7 +148,7 @@ async def stream(websocket: WebSocket, call_session_id: str) -> None:
         await safe_close(1011)
         return
 
-    task, accumulator, _context = build_pipeline(
+    task, collector, _context = build_pipeline(
         websocket,
         stream_sid,
         call_sid,
@@ -169,7 +169,7 @@ async def stream(websocket: WebSocket, call_session_id: str) -> None:
         return
 
     logger.info(f"Building outcome for callSid {call_sid}")
-    payload = await accumulator.build_outcome(
+    payload = await collector.build_outcome(
         call_session_id=corr.call_session_id,
         twilio_call_sid=call_sid,
         twilio_client=twilio,
