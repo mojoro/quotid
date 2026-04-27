@@ -65,6 +65,12 @@ async def create_call(req: CreateCallRequest) -> CreateCallResponse:
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             record=True,
             recording_channels="dual",
+            # Detect voicemail / answering machines so the bot doesn't pour a
+            # journaling prompt into someone's voicemail. Twilio waits ~3s
+            # before fetching TwiML, then passes AnsweredBy as a form param
+            # which /twiml uses to decide between <Connect><Stream/></Connect>
+            # and <Hangup/>. Adds ~$0.0075/call.
+            machine_detection="Enable",
         )
     except TwilioRestException as e:
         # Forward Twilio's HTTP status so the worker classifies retryability
@@ -168,6 +174,21 @@ async def twiml(
     if not verify(full_url, form, x_twilio_signature):
         logger.warning(f"Invalid Twilio signature on /twiml for {call_session_id} (url={full_url})")
         raise HTTPException(status_code=403)
+
+    # Twilio AMD result. "human" (or absent / "unknown") → engage the pipeline.
+    # Anything starting with "machine_" or "fax" → hang up immediately so the
+    # bot doesn't talk to voicemail. The "completed" status callback then
+    # finalizes the workflow as NO_ANSWER.
+    answered_by = (form.get("AnsweredBy") or "").lower()
+    if answered_by.startswith("machine_") or answered_by == "fax":
+        logger.info(
+            f"Detected voicemail/machine ({answered_by}) for "
+            f"call_session_id={call_session_id}; hanging up"
+        )
+        return PlainTextResponse(
+            content='<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>',
+            media_type="application/xml",
+        )
 
     stream_url = (
         f"{CONFIG.bot_public_url.replace('https://', 'wss://').replace('http://', 'ws://')}"
