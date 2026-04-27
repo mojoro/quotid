@@ -38,6 +38,8 @@ tags:
     description: User-facing journal data.
   - name: call-schedules
     description: When the user wants to be called.
+  - name: voice
+    description: TTS voice preview (settings page audition).
   - name: webhooks
     description: Inbound webhooks from external services.
 
@@ -235,16 +237,89 @@ paths:
         default:
           $ref: '#/components/responses/ProblemResponse'
 
+  /voice-preview:
+    get:
+      tags: [voice]
+      summary: Stream a short TTS sample of a Deepgram Aura voice.
+      description: |
+        Settings page lets the user audition each available Aura 2 voice
+        before selecting it. The handler proxies a fixed preview sentence
+        through Deepgram's `/v1/speak` endpoint and streams the audio body
+        back to the browser as `audio/mpeg`.
+
+        Cached browser-side for 24h (`Cache-Control: private, max-age=86400`)
+        — the preview text and voice catalogue are static.
+
+        The list of permitted voice IDs is enforced server-side; requests
+        for a voice outside the allowlist are rejected with 400. The
+        canonical list lives in `app/(app)/settings/voices.ts` and is
+        currently:
+        `aura-2-thalia-en`, `aura-2-orion-en`, `aura-2-luna-en`,
+        `aura-2-aries-en`, `aura-2-draco-en`, `aura-2-iris-en`.
+
+        **Auth:** session cookie via the proxy — the Route Handler reads
+        `x-user-id` injected by `proxy.ts`. There is no separate auth
+        header.
+      operationId: getVoicePreview
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: voice
+          in: query
+          required: true
+          description: |
+            Deepgram Aura 2 model ID. Must be one of the allowlisted IDs;
+            unknown values return 400.
+          schema:
+            type: string
+            enum:
+              - aura-2-thalia-en
+              - aura-2-orion-en
+              - aura-2-luna-en
+              - aura-2-aries-en
+              - aura-2-draco-en
+              - aura-2-iris-en
+      responses:
+        '200':
+          description: MP3 audio of the preview sentence.
+          headers:
+            Content-Type:
+              schema: { type: string, example: 'audio/mpeg' }
+            Cache-Control:
+              schema: { type: string, example: 'private, max-age=86400' }
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: '`voice` query param missing or not in the allowlist.'
+        '401':
+          description: No authenticated session (no `x-user-id` header from proxy).
+        '502':
+          description: Deepgram returned a non-2xx status; that status is propagated.
+        '503':
+          description: '`DEEPGRAM_API_KEY` not configured on the server.'
+
   /webhooks/twilio/call-status:
     post:
       tags: [webhooks]
-      summary: Twilio statusCallback — watchdog for Pipecat crashes.
+      summary: Twilio statusCallback — watchdog + live-state writer.
       description: |
-        Triggered by Twilio on every call lifecycle event. For the watchdog
-        flow we only care about abnormal statuses: `no-answer`, `failed`,
-        `busy`, `canceled`. When one fires, the handler completes the
-        corresponding Temporal `await-call` activity externally with a
-        `CallOutcome(status=FAILED|NO_ANSWER)` payload.
+        Triggered by Twilio on every call lifecycle event. The handler
+        does two distinct things:
+
+        1. **`CallStatus=in-progress`** (Twilio's "answered" event) — the
+           handler updates the matching `CallSession` row from
+           `DIALING`/`PENDING` to `IN_PROGRESS` and stamps `started_at`.
+           This is what flips the in-progress banner / "Live" pill in the
+           UI. Temporal is **not** notified; Pipecat is still the
+           authoritative completer for the happy path.
+
+        2. **Abnormal statuses** (`no-answer`, `failed`, `busy`,
+           `canceled`) — the handler completes the corresponding Temporal
+           `await-call` activity externally with a
+           `CallOutcome(status=FAILED|NO_ANSWER)` payload.
 
         Normal `completed` status is **NOT** forwarded to Temporal — Pipecat
         is the authoritative completer on the happy path. See
@@ -423,8 +498,14 @@ components:
           enum:
             [queued, ringing, in-progress, completed, busy, no-answer, failed, canceled]
           description: |
-            Watchdog cares about `no-answer`, `failed`, `busy`, `canceled`.
-            All others are observational.
+            Triggers DB writes on:
+              - `in-progress` — flips `CallSession.status` to `IN_PROGRESS`
+                and stamps `started_at`.
+              - `no-answer` / `failed` / `busy` / `canceled` — completes
+                the Temporal `await-call` activity with a
+                `CallOutcome(FAILED|NO_ANSWER)`.
+            All others (`queued`, `ringing`, `completed`) are observational —
+            the handler 204s without touching state.
         CallDuration:
           type: string
           description: Integer seconds as a string (Twilio form-encodes everything).
