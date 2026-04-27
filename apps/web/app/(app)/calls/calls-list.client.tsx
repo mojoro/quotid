@@ -74,7 +74,10 @@ export function CallsListClient({ items }: { items: Item[] }) {
 }
 
 function CallRow({ item }: { item: Item }) {
-  const date = new Date(item.scheduledFor);
+  // Prefer the actual call start when we have it. `scheduledFor` can be epoch
+  // for older Schedule-fired calls (the workflow now substitutes a real time
+  // before writing, but legacy rows aren't backfilled in code).
+  const date = new Date(item.startedAt ?? item.scheduledFor);
   const dateLabel = date.toLocaleDateString(undefined, {
     month: "short",
     day: "2-digit",
