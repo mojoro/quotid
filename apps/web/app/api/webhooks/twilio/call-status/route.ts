@@ -44,7 +44,18 @@ export async function POST(req: NextRequest) {
     return new NextResponse(null, { status: 204 });
   }
 
-  if (!ABNORMAL.has(callStatus)) return new NextResponse(null, { status: 204 });
+  // We treat "completed" as a backstop signal, not as the primary completion
+  // path. The bot's WSS handler is the source of truth — when it finalizes the
+  // pipeline normally, it completes the await_call activity with a full
+  // outcome. But sometimes the WSS never opens (voicemail picks up too fast,
+  // bot crashed before TwiML fetch, etc.) and "completed" is the ONLY signal
+  // that the call ended. In those cases we mark the activity as NO_ANSWER so
+  // the workflow proceeds to handle_missed_call instead of hanging until the
+  // 20-minute start-to-close timeout. Activity-already-complete races are
+  // swallowed below.
+  if (callStatus !== "completed" && !ABNORMAL.has(callStatus)) {
+    return new NextResponse(null, { status: 204 });
+  }
 
   const cs = await prisma.callSession.findUnique({
     where: { twilioCallSid: callSid },
@@ -53,11 +64,15 @@ export async function POST(req: NextRequest) {
   if (!cs) return new NextResponse(null, { status: 204 });
 
   const client = await getTemporalClient();
+  const status =
+    callStatus === "completed"
+      ? "NO_ANSWER"
+      : STATUS_MAP[callStatus] ?? "FAILED";
   try {
     await client.activity.complete(
       { workflowId: cs.temporalWorkflowId, activityId: "await-call" },
       {
-        status: STATUS_MAP[callStatus] ?? "FAILED",
+        status,
         call_session_id: cs.id,
         twilio_call_sid: callSid,
         failure_reason: `twilio:${callStatus}`,
