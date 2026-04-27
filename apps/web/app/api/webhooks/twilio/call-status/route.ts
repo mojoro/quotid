@@ -34,6 +34,16 @@ export async function POST(req: NextRequest) {
   const callStatus = params.get("CallStatus");
   if (!callSid || !callStatus) return new NextResponse(null, { status: 204 });
 
+  // Twilio "answered" event arrives as CallStatus="in-progress". Mark the
+  // CallSession live so the dashboard banner can flip from "Calling" → "Live".
+  if (callStatus === "in-progress") {
+    await prisma.callSession.updateMany({
+      where: { twilioCallSid: callSid, status: { in: ["DIALING", "PENDING"] } },
+      data: { status: "IN_PROGRESS", startedAt: new Date() },
+    });
+    return new NextResponse(null, { status: 204 });
+  }
+
   if (!ABNORMAL.has(callStatus)) return new NextResponse(null, { status: 204 });
 
   const cs = await prisma.callSession.findUnique({
