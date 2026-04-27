@@ -29,16 +29,11 @@ export function Transcript({ turns, userLabel }: Props) {
               className="grid grid-cols-[70px_1fr] gap-3.5 py-2.5 max-md:grid-cols-1 max-md:gap-1"
             >
               <div
-                className={`pt-1.5 text-[11px] tracking-[0.1em] uppercase max-md:flex max-md:items-baseline max-md:gap-2 max-md:pt-0 ${
+                className={`pt-1.5 text-[11px] tracking-[0.1em] uppercase ${
                   turn.who === "bot" ? "text-accent-ink" : "text-ink-3"
                 }`}
               >
                 {turn.who === "bot" ? "Quotid" : userLabel}
-                {turn.t && (
-                  <div className="mt-1 font-mono text-[11px] text-ink-4 max-md:mt-0">
-                    {turn.t}
-                  </div>
-                )}
               </div>
               <div className="text-[15px] leading-[1.6] break-words text-ink max-md:[overflow-wrap:anywhere]">
                 {turn.text}
