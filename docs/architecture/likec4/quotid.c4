@@ -36,12 +36,12 @@ model {
 
     web = webapp 'Web App' {
       technology 'Next.js 16, TanStack Query'
-      description 'UI, Server Actions, Route Handlers. Settings page edits user profile (name, phone, timezone, voicePreference) and call schedule (time, daysOfWeek bitmask). Twilio status webhook flips CallSession to IN_PROGRESS on answer and to NO_ANSWER/FAILED on abnormal events. Proxies voice previews via /api/voice-preview.'
+      description 'UI, Server Actions, Route Handlers. Settings page edits user profile (name, phone, timezone, voicePreference) and call schedule (time, daysOfWeek bitmask). Twilio status webhook flips CallSession to IN_PROGRESS on answer and to NO_ANSWER/FAILED on abnormal events (status webhook only completes the await_call activity for abnormal/machine-pickup events; human-pickup completion is owned by the bot WSS handler). Proxies voice previews via /api/voice-preview. Live-call routes /api/call-sessions/{id}/transcript and /api/call-sessions/{id}/end proxy to the bot over the docker network via BOT_INTERNAL_URL.'
     }
 
     pipecat = container 'Pipecat Bot Server' {
       technology 'Python, FastAPI'
-      description 'Telephony bridge. REST: /calls, /calls/{sid}/twiml. WSS: /calls/{sid}/stream. Runs the STT→LLM→TTS pipeline per call. Two frame processors (UserTranscriptCapture after STT, AssistantTextCapture after LLM) feed a shared TranscriptCollector that becomes the call outcome.'
+      description 'Telephony bridge. REST: /calls (initiate; passes machine_detection=Enable to Twilio), /calls/{sid}/twiml (forks on AnsweredBy: human → <Connect><Stream>; machine/fax → <Hangup/>), /calls/{sid}/transcript (live transcript poll), /calls/{sid}/end (force hangup). WSS: /calls/{sid}/stream. Runs the STT→LLM→TTS pipeline per call; STT vendor is selected by stt_factory.py. Two frame processors (UserTranscriptCapture after STT, AssistantTextCapture after LLM) feed a shared TranscriptCollector that becomes the call outcome.'
     }
 
     worker = container 'Temporal Worker' {
@@ -92,6 +92,9 @@ model {
   quotid.web -[grpc]-> quotid.temporal 'Triggers workflows, queries state'
   quotid.web -[pg]-> neon 'CRUD via Prisma (user profile, call schedule incl. daysOfWeek bitmask, journal entries)'
   quotid.web -[https]-> deepgramTts 'Voice preview clips (POST /v1/speak)'
+  // BOT_INTERNAL_URL=http://bot:8000 (docker network); used by Next route handlers
+  // /api/call-sessions/{id}/transcript and /api/call-sessions/{id}/end.
+  quotid.web -[https]-> quotid.pipecat 'Live transcript polling + hangup proxy (GET /calls/{sid}/transcript, POST /calls/{sid}/end)'
 
   quotid.temporal -[grpc]-> quotid.worker 'Dispatches activity tasks'
   quotid.temporal -> quotid.tempvol 'Persists workflow history' { technology 'SQLite' }
@@ -180,10 +183,11 @@ views {
     quotid.temporal -> quotid.worker 'Schedule fires; starts JournalingWorkflow'
     quotid.worker -> neon 'activity: create_call_session — read phone, timezone, voicePreference, name' { technology 'Postgres' }
     quotid.worker -> quotid.pipecat 'activity: initiate_call(wf_id, activity_id, phone, voice, user_name)' { technology 'HTTPS POST /calls' }
-    quotid.pipecat -> twilio 'calls.create(to=phone, twiml_url=/twiml)' { technology 'REST' }
+    quotid.pipecat -> twilio 'calls.create(to=phone, twiml_url=/twiml, machine_detection=Enable)' { technology 'REST' }
     twilio -> user 'Ring' { technology 'PSTN' }
-    twilio -> quotid.pipecat 'GET /calls/{sid}/twiml returns <Connect><Stream>' { technology 'HTTPS' }
+    twilio -> quotid.pipecat 'GET /calls/{sid}/twiml?AnsweredBy=human → <Connect><Stream> (AMD branch: machine/fax → <Hangup/>, no WSS)' { technology 'HTTPS' }
     twilio -> quotid.pipecat 'Opens WSS /calls/{sid}/stream' { technology 'WSS, μ-law 8kHz' }
+    quotid.web -> quotid.pipecat 'Live: GET /calls/{sid}/transcript, POST /calls/{sid}/end (docker network)' { technology 'HTTP' }
     quotid.pipecat -> deepgram 'Stream audio → transcripts' { technology 'WSS' }
     quotid.pipecat -> openrouter 'Per turn: transcript → Claude Haiku' { technology 'HTTPS' }
     quotid.pipecat -> deepgramTts 'Stream text → PCM audio chunks' { technology 'WSS' }
@@ -209,20 +213,27 @@ views {
     quotid.worker -> quotid.pipecat 'POST /calls { wf_id, activity_id, phone, voice, user_name }'
     quotid.worker <- quotid.pipecat '201 Created { call_sid }'
 
-    quotid.pipecat -> twilio 'REST: calls.create(to, twiml_url)'
+    quotid.pipecat -> twilio 'REST: calls.create(to, twiml_url, machine_detection=Enable)'
     quotid.pipecat <- twilio 'Call SID'
 
     twilio -> user 'PSTN ring'
     twilio <- user 'answered'
 
-    twilio -> quotid.pipecat 'GET /calls/{sid}/twiml'
-    twilio <- quotid.pipecat '<Connect><Stream url=wss://.../calls/{sid}/stream>'
+    // Twilio AMD result included on /twiml fetch
+    twilio -> quotid.pipecat 'GET /calls/{sid}/twiml?AnsweredBy=human|machine_*'
+    twilio <- quotid.pipecat 'human: <Connect><Stream url=wss://.../calls/{sid}/stream>; machine/fax: <Hangup/> (no WSS, status webhook closes the workflow)'
 
-    twilio -> quotid.pipecat 'WSS open /calls/{sid}/stream'
+    twilio -> quotid.pipecat 'WSS open /calls/{sid}/stream (human branch only)'
 
     // Twilio "answered" status callback — flips CallSession DIALING → IN_PROGRESS
     twilio -> quotid.web 'POST /api/webhooks/twilio/call-status (CallStatus=in-progress)'
     quotid.web -> neon 'UPDATE call_sessions SET status=IN_PROGRESS, started_at=now()'
+
+    // Live-call UI polling + force-hangup (Next proxies to bot over docker network)
+    quotid.web -> quotid.pipecat 'GET /calls/{sid}/transcript (poll)'
+    quotid.web <- quotid.pipecat 'partial transcript JSON'
+    quotid.web -> quotid.pipecat 'POST /calls/{sid}/end (user clicked End Call)'
+    quotid.pipecat -> twilio 'calls(sid).update(status=completed)'
 
     // Per turn (abstracted — repeats ~30x during a 10-min call)
     quotid.pipecat -> deepgram 'stream audio chunks'
@@ -237,9 +248,12 @@ views {
     // Call ends
     user -> twilio 'hangup'
     twilio -> quotid.pipecat 'WSS close'
+    // Status webhook is the watchdog — but for human-pickup completes the bot WSS
+    // handler is the authoritative path; webhook only completes await_call for
+    // abnormal events or machine-pickup completes (race avoidance).
     twilio -> quotid.web 'POST /api/webhooks/twilio/call-status (watchdog)'
 
-    // Post-call
+    // Post-call (bot completes the activity for human-pickup calls)
     quotid.pipecat -> quotid.temporal 'complete_activity(payload)'
     quotid.temporal -> quotid.worker 'workflow resumes'
     quotid.worker -> openrouter 'summarize(transcript) via Sonnet'
