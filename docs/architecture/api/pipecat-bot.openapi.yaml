@@ -4,16 +4,23 @@ info:
   version: 0.1.0
   description: |
     Python FastAPI service that bridges Temporal to Twilio and runs the per-call
-    Pipecat pipeline (STT → LLM → TTS). Three REST endpoints plus a WebSocket
-    endpoint (documented in `docs/architecture/api/README.md` §4 — WebSockets
-    don't fit OpenAPI).
+    Pipecat pipeline (STT → LLM → TTS). REST endpoints listed below plus a
+    WebSocket endpoint (documented in `docs/architecture/api/README.md` §4 —
+    WebSockets don't fit OpenAPI).
 
     **Topology:** runs inside the AWS Lightsail VM's Docker network. Caddy
     exposes `/calls/{call_sid}/twiml` and `/calls/{call_sid}/stream` publicly
-    because Twilio must reach them; `POST /calls` and `GET /calls/{call_sid}`
-    are internal-only (Caddy matcher blocks external access — see the
-    Caddyfile and the "Caddy 403s public POST `/calls`" invariant in
-    `CLAUDE.md`).
+    because Twilio must reach them; `POST /calls`, `GET /calls/{call_sid}`,
+    `GET /calls/{call_sid}/transcript`, and `POST /calls/{call_sid}/end` are
+    internal-only (Caddy matcher blocks external access — see the Caddyfile
+    and the "Caddy 403s public POST `/calls`" invariant in `CLAUDE.md`).
+
+    **Status-callback orientation (out of scope here):** Twilio's
+    `statusCallback` events post to the *web app*, not this bot — see
+    `nextjs.openapi.yaml` `/webhooks/twilio/call-status`. That webhook is
+    what advances the workflow on abnormal call outcomes (no-answer / busy
+    / voicemail). The bot's job on the happy path is to run the WSS
+    pipeline and complete the `await-call` activity itself.
 
     **Naming convention:** JSON property names use `snake_case` per Zalando
     guidelines. Path segments use kebab-case. `operationId` values use
@@ -44,6 +51,20 @@ paths:
         Twilio outbound call (`twilio.calls.create`) pointed at the TwiML
         endpoint below, stashes the `workflow_id` + `activity_id` so Pipecat
         can async-complete the corresponding Temporal activity on session end.
+
+        Server-side, the call is created with `machine_detection="Enable"`
+        and dual-channel recording. AMD adds ~3 s of pre-TwiML latency and
+        ~$0.0075/call but lets `/twiml` short-circuit voicemail pickups
+        with `<Hangup/>` instead of dumping a journaling prompt into
+        someone's mailbox. AMD is server-side only — clients don't pass
+        anything related to it.
+
+        On Twilio rejection, the response status mirrors Twilio's HTTP
+        status (4xx / 5xx) and the body's `detail` carries the Twilio
+        error message. This lets the worker classify retryability
+        correctly — bare-throwing as 500 would burn the worker's retry
+        budget on permanent rejections (unverified destination,
+        suspended account, etc.).
 
         **Internal only.** Caddy denies external traffic to this path.
       operationId: createCall
@@ -106,13 +127,100 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
 
+  /calls/{call_sid}/transcript:
+    get:
+      tags: [calls]
+      summary: Live transcript snapshot for an active call.
+      description: |
+        Returns the in-memory chronological transcript collected by the
+        running Pipecat pipeline. The web app proxies this for its
+        live-call UI (see `nextjs.openapi.yaml`
+        `/call-sessions/{id}/transcript`).
+
+        Empty `segments` is a valid response — it means either the
+        pipeline hasn't started yet (WSS not connected) or it has already
+        torn down (call finalized; collector removed). Source of truth
+        for finalized transcripts is the `transcripts` DB row, not this
+        endpoint.
+
+        **Internal only.**
+      operationId: getCallTranscript
+      security:
+        - internalNetwork: []
+      parameters:
+        - $ref: '#/components/parameters/CallSidPath'
+      responses:
+        '200':
+          description: Live transcript (possibly empty).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveTranscriptResponse'
+        default:
+          description: Error — see status code and problem object.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /calls/{call_sid}/end:
+    post:
+      tags: [calls]
+      summary: Hang up an active call on user request.
+      description: |
+        Asks Twilio to mark the call `completed`
+        (`twilio.calls(call_sid).update(status="completed")`) AND fails
+        the workflow's `await-call` activity directly with reason
+        `user_ended`.
+
+        The dual action is intentional: if the WSS never opened (e.g. AMD
+        flagged the call as voicemail and `/twiml` returned `<Hangup/>`,
+        or the user pressed "End call" before the bot greeted), nobody
+        else will ever complete the activity. Without the explicit
+        `fail_await_call`, the workflow would hang for the full
+        `start_to_close` timeout (~20 minutes) before the backstop fires.
+
+        Returns 404 if the `call_sid` isn't in the in-process correlation
+        registry (already finalized or never registered).
+
+        **Internal only.**
+      operationId: endCall
+      security:
+        - internalNetwork: []
+      parameters:
+        - $ref: '#/components/parameters/CallSidPath'
+      responses:
+        '202':
+          description: Hangup accepted. Body `{ok: true}`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                additionalProperties: false
+                properties:
+                  ok: { type: boolean, const: true }
+        default:
+          description: Error — see status code and problem object.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
   /calls/{call_sid}/twiml:
     get:
       tags: [twilio]
       summary: Return TwiML instructing Twilio to open the Media Stream.
       description: |
         Twilio fetches this after accepting the call. Response is XML, not JSON.
-        Body is `<Response><Connect><Stream url="wss://.../calls/{call_sid}/stream"/></Connect></Response>`.
+
+        Branches on Twilio's AMD result (`AnsweredBy` form field, present
+        because the outbound call was created with
+        `machine_detection=Enable`):
+
+        - `human` / `unknown` / unset → `<Response><Connect><Stream url="wss://.../calls/{call_sid}/stream"/></Connect></Response>`
+        - `machine_*` / `fax` → `<Response><Hangup/></Response>` so the bot
+          doesn't pour a journaling prompt into voicemail. The follow-up
+          `completed` status callback (received by the web app) finalizes
+          the workflow as `NO_ANSWER`.
 
         **Public.** Authenticated via Twilio signature (`X-Twilio-Signature` header).
       operationId: getCallTwiml
@@ -226,6 +334,27 @@ components:
           description: Twilio-assigned Call SID. Persisted to `call_sessions.twilio_call_sid`.
           pattern: '^CA[a-fA-F0-9]{32}$'
           example: CA1234567890abcdef1234567890abcdef
+
+    LiveTranscriptResponse:
+      type: object
+      required: [segments]
+      additionalProperties: false
+      description: |
+        In-memory chronological transcript for an active call. Empty
+        `segments` is valid — pipeline not started yet, or already torn down.
+      properties:
+        segments:
+          type: array
+          items:
+            type: object
+            required: [speaker, text]
+            additionalProperties: false
+            properties:
+              speaker:
+                type: string
+                description: '`assistant` for bot turns, `user` for caller turns.'
+              text:
+                type: string
 
     CallState:
       type: object
