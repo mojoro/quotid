@@ -147,13 +147,25 @@ async def end_call(call_sid: str) -> dict:
         logger.warning(f"Twilio refused to end call {call_sid}: {e.msg}")
         raise HTTPException(status_code=status_code, detail=str(e.msg or e))
 
-    # Short-circuit the workflow's await_call activity directly. If the WSS
-    # never opened (voicemail pickup, AMD failure, etc.) nobody else will
-    # ever complete it, so the workflow would otherwise hang for 20 minutes
-    # until the start-to-close timeout fires the backstop.
-    await fail_await_call(corr.workflow_id, "user_ended")
+    # If the WSS is open (pipeline running), Twilio's hangup will propagate
+    # → `on_client_disconnected` fires → pipeline finalizes → bot's
+    # `complete_await_call` stores the transcript and creates the journal
+    # entry. Failing the activity here would race that path and DESTROY the
+    # journal entry (the await_call activity is once-and-done).
+    #
+    # Only short-circuit when the WSS never opened (user pressed End during
+    # DIALING, AMD-Hangup branch, etc.) — without that backstop the
+    # await_call activity hangs for 20 minutes.
+    if lookup_collector(call_sid) is None:
+        await fail_await_call(corr.workflow_id, "user_ended_before_pipeline")
+        logger.info(
+            f"Hung up {call_sid} before WSS opened; failed await_call directly"
+        )
+    else:
+        logger.info(
+            f"Hung up {call_sid}; bot pipeline will finalize the activity"
+        )
 
-    logger.info(f"Hung up Twilio call {call_sid} on user request")
     return {"ok": True}
 
 
