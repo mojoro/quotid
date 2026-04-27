@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import {
-  AVAILABLE_VOICES,
   updateCallSchedule,
   updateProfile,
   updateVoicePreference,
 } from "./actions";
+import { AVAILABLE_VOICES } from "./voices";
 
 const COMMON_TIMEZONES = [
   "America/Los_Angeles",
