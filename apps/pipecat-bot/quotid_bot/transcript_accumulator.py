@@ -50,12 +50,9 @@ class TranscriptAccumulator(FrameProcessor):
     ) -> dict:
         import asyncio
 
-        assistant_segments = self._assistant_segments_from_context()
-        all_segments = [s.__dict__ for s in self._segments + assistant_segments]
+        all_segments = [s.__dict__ for s in self._interleaved_segments()]
         transcript_text = " ".join(
-            m.get("content", "")
-            for m in self._context.messages
-            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+            seg["text"] for seg in all_segments if seg.get("text")
         )
 
         try:
@@ -91,17 +88,40 @@ class TranscriptAccumulator(FrameProcessor):
             "duration_seconds": duration_seconds,
         }
 
-    def _assistant_segments_from_context(self) -> list[Segment]:
+    def _interleaved_segments(self) -> list[Segment]:
+        """Walk the LLM context in chronological order so user/assistant turns
+        alternate as they did on the call. User segments carry their own
+        timestamps; assistant turns inherit the most recent user `start_ms`
+        (or 0 if the assistant spoke first) so downstream sort-by-time stays
+        stable.
+        """
         out: list[Segment] = []
+        user_idx = 0
+        last_t: int | None = 0
         for m in self._context.messages:
-            if m.get("role") != "assistant":
+            role = m.get("role")
+            if role not in ("user", "assistant"):
                 continue
             content = m.get("content", "")
             if isinstance(content, list):
                 content = " ".join(
                     c.get("text", "") for c in content if isinstance(c, dict)
                 )
-            if not content:
+            if not isinstance(content, str) or not content:
                 continue
-            out.append(Segment(speaker="assistant", text=content))
+            if role == "user":
+                if user_idx < len(self._segments):
+                    seg = self._segments[user_idx]
+                    user_idx += 1
+                    if seg.start_ms is not None:
+                        last_t = seg.start_ms
+                    out.append(seg)
+                else:
+                    out.append(Segment(speaker="user", text=content, start_ms=last_t))
+            else:  # assistant
+                out.append(Segment(speaker="assistant", text=content, start_ms=last_t))
+        # Append any user segments that arrived after the last context flush.
+        while user_idx < len(self._segments):
+            out.append(self._segments[user_idx])
+            user_idx += 1
         return out
