@@ -56,6 +56,10 @@ class CallOutcome(BaseModel):
     recording_url: str | None = None
     transcript_text: str | None = None
     transcript_segments: list[dict] | None = Field(default=None)
+    # Matches a value of Prisma's TranscriptProvider enum. Default keeps
+    # backwards-compat for failure-path constructions in workflows.py that
+    # don't go through the bot's TranscriptCollector.
+    transcript_provider: str = "DEEPGRAM"
     failure_reason: str | None = None
 
 

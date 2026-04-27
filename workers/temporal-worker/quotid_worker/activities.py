@@ -167,7 +167,7 @@ async def store_entry(inp: StoreEntryInput) -> str:
                 "create": {
                     "callSession": {"connect": {"id": inp.outcome.call_session_id}},
                     "kind": "REALTIME",
-                    "provider": "DEEPGRAM",
+                    "provider": inp.outcome.transcript_provider,
                     "text": inp.outcome.transcript_text,
                     "segments": segments_json,
                     "wordCount": len(inp.outcome.transcript_text.split()),

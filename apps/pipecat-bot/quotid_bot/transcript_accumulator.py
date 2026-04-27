@@ -25,8 +25,16 @@ class TranscriptCollector:
     — no post-hoc reassembly from LLM context.
     """
 
-    def __init__(self, *, opening_line: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        opening_line: str | None = None,
+        provider: str = "DEEPGRAM",
+    ) -> None:
         self.segments: list[Segment] = []
+        # Matches a value of Prisma's TranscriptProvider enum; flows into the
+        # outcome dict and ultimately into the Transcript row's provider column.
+        self._provider = provider
         if opening_line and opening_line.strip():
             self.segments.append(Segment("assistant", opening_line.strip()))
 
@@ -67,6 +75,7 @@ class TranscriptCollector:
             "twilio_call_sid": twilio_call_sid,
             "transcript_text": transcript_text,
             "transcript_segments": all_segments,
+            "transcript_provider": self._provider,
             "recording_url": recording_url,
             "started_at": started_at,
             "ended_at": ended_at,
