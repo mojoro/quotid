@@ -129,7 +129,8 @@ async def live_transcript(call_sid: str) -> LiveTranscriptResponse:
 
 @app.post("/calls/{call_sid}/end", status_code=202)
 async def end_call(call_sid: str) -> dict:
-    if lookup(call_sid) is None:
+    corr = lookup(call_sid)
+    if corr is None:
         raise HTTPException(status_code=404, detail="unknown call_sid")
     try:
         await asyncio.to_thread(
@@ -139,6 +140,13 @@ async def end_call(call_sid: str) -> dict:
         status_code = e.status if isinstance(e.status, int) and 400 <= e.status < 600 else 502
         logger.warning(f"Twilio refused to end call {call_sid}: {e.msg}")
         raise HTTPException(status_code=status_code, detail=str(e.msg or e))
+
+    # Short-circuit the workflow's await_call activity directly. If the WSS
+    # never opened (voicemail pickup, AMD failure, etc.) nobody else will
+    # ever complete it, so the workflow would otherwise hang for 20 minutes
+    # until the start-to-close timeout fires the backstop.
+    await fail_await_call(corr.workflow_id, "user_ended")
+
     logger.info(f"Hung up Twilio call {call_sid} on user request")
     return {"ok": True}
 
