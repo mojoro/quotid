@@ -34,7 +34,13 @@ function matchesFilter(item: Item, f: Filter): boolean {
   return true;
 }
 
-export function CallsListClient({ items }: { items: Item[] }) {
+export function CallsListClient({
+  items,
+  timezone,
+}: {
+  items: Item[];
+  timezone: string;
+}) {
   const [filter, setFilter] = useState<Filter>("all");
   const visible = items.filter((i) => matchesFilter(i, filter));
 
@@ -66,14 +72,16 @@ export function CallsListClient({ items }: { items: Item[] }) {
             No calls match this filter.
           </p>
         ) : (
-          visible.map((item) => <CallRow key={item.id} item={item} />)
+          visible.map((item) => (
+            <CallRow key={item.id} item={item} timezone={timezone} />
+          ))
         )}
       </div>
     </>
   );
 }
 
-function CallRow({ item }: { item: Item }) {
+function CallRow({ item, timezone }: { item: Item; timezone: string }) {
   // Prefer the actual call start when we have it. `scheduledFor` can be epoch
   // for older Schedule-fired calls (the workflow now substitutes a real time
   // before writing, but legacy rows aren't backfilled in code).
@@ -81,11 +89,13 @@ function CallRow({ item }: { item: Item }) {
   const dateLabel = date.toLocaleDateString(undefined, {
     month: "short",
     day: "2-digit",
+    timeZone: timezone,
   });
   const timeLabel = date.toLocaleTimeString(undefined, {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    timeZone: timezone,
   });
 
   const title =

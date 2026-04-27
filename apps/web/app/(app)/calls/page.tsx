@@ -5,12 +5,20 @@ import { CallsListClient } from "./calls-list.client";
 export default async function CallsPage() {
   const userId = await currentUserId();
 
-  const sessions = await prisma.callSession.findMany({
-    where: { userId },
-    orderBy: { scheduledFor: "desc" },
-    take: 200,
-    include: { journalEntry: { select: { id: true, title: true } } },
-  });
+  const [user, sessions] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { timezone: true },
+    }),
+    prisma.callSession.findMany({
+      where: { userId },
+      orderBy: { scheduledFor: "desc" },
+      take: 200,
+      include: { journalEntry: { select: { id: true, title: true } } },
+    }),
+  ]);
+
+  if (!user) return null;
 
   const items = sessions.map((s) => ({
     id: s.id,
@@ -36,7 +44,7 @@ export default async function CallsPage() {
         we said, or jump to the journal entry.
       </p>
 
-      <CallsListClient items={items} />
+      <CallsListClient items={items} timezone={user.timezone} />
 
       <div className="h-20" />
     </div>
