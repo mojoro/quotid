@@ -72,7 +72,8 @@ def build_pipeline(
     context = LLMContext(
         messages=[{"role": "system", "content": system_prompt(user_name)}]
     )
-    accumulator = TranscriptAccumulator(context)
+    greeting = opening_line(user_name)
+    accumulator = TranscriptAccumulator(context, opening_line=greeting)
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
@@ -113,7 +114,7 @@ def build_pipeline(
 
     @transport.event_handler("on_client_connected")
     async def kick_off(_t, _client):
-        await task.queue_frames([TextFrame(opening_line(user_name))])
+        await task.queue_frames([TextFrame(greeting)])
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnect(_t, _client):

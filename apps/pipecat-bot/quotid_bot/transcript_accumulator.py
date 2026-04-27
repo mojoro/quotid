@@ -18,10 +18,16 @@ class Segment:
 class TranscriptAccumulator(FrameProcessor):
     """Pass-through processor; siphons final user TranscriptionFrames."""
 
-    def __init__(self, context: LLMContext) -> None:
+    def __init__(
+        self,
+        context: LLMContext,
+        *,
+        opening_line: str | None = None,
+    ) -> None:
         super().__init__()
         self._segments: list[Segment] = []
         self._context = context
+        self._opening_line = opening_line
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -89,13 +95,22 @@ class TranscriptAccumulator(FrameProcessor):
         }
 
     def _interleaved_segments(self) -> list[Segment]:
-        """Walk the LLM context in chronological order so user/assistant turns
-        alternate as they did on the call. User segments carry their own
-        timestamps; assistant turns inherit the most recent user `start_ms`
-        (or 0 if the assistant spoke first) so downstream sort-by-time stays
-        stable.
+        """Reconstruct chronological order. The bot always speaks first
+        (opening line is queued before STT can produce anything), but in the
+        LLM context a user TranscriptionFrame can land BEFORE the assistant's
+        opening line if STT finalizes faster than TTS — so the context order
+        isn't reliable on its own. We hardcode the opening line at the front
+        and skip the matching first assistant message in the context to avoid
+        a duplicate.
         """
         out: list[Segment] = []
+        skip_first_asst = False
+        if self._opening_line:
+            out.append(
+                Segment(speaker="assistant", text=self._opening_line, start_ms=0)
+            )
+            skip_first_asst = True
+
         user_idx = 0
         last_t: int | None = 0
         for m in self._context.messages:
@@ -119,6 +134,9 @@ class TranscriptAccumulator(FrameProcessor):
                 else:
                     out.append(Segment(speaker="user", text=content, start_ms=last_t))
             else:  # assistant
+                if skip_first_asst:
+                    skip_first_asst = False
+                    continue
                 out.append(Segment(speaker="assistant", text=content, start_ms=last_t))
         # Append any user segments that arrived after the last context flush.
         while user_idx < len(self._segments):
