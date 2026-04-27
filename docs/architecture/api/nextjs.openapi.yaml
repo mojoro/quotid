@@ -38,6 +38,8 @@ tags:
     description: User-facing journal data.
   - name: call-schedules
     description: When the user wants to be called.
+  - name: call-sessions
+    description: Live-call control surface (transcript polling, hangup).
   - name: voice
     description: TTS voice preview (settings page audition).
   - name: webhooks
@@ -237,6 +239,87 @@ paths:
         default:
           $ref: '#/components/responses/ProblemResponse'
 
+  /call-sessions/{id}/transcript:
+    get:
+      tags: [call-sessions]
+      summary: Live transcript of an in-progress call.
+      description: |
+        Browser-side polling endpoint for the live-call UI. The handler
+        looks up the `CallSession` (auth-gated by `userId`), reads its
+        `twilio_call_sid`, and proxies to the bot's
+        `GET /calls/{call_sid}/transcript` over the internal Docker
+        network (`BOT_INTERNAL_URL`).
+
+        Returns `{segments: []}` (200) when the call has no
+        `twilio_call_sid` yet (still PENDING) or when the bot has already
+        torn down the in-memory collector. The empty-segments shape is
+        intentional — the UI treats it the same as "nothing said yet" so
+        polling stays simple.
+
+        **Auth:** session cookie via `proxy.ts` (`x-user-id` header).
+      operationId: getCallSessionTranscript
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CallSessionIdPath'
+      responses:
+        '200':
+          description: Live transcript snapshot (possibly empty).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LiveTranscript' }
+        '401':
+          description: No authenticated session.
+        '404':
+          description: CallSession not found or not owned by the user.
+        '503':
+          description: '`BOT_INTERNAL_URL` not configured on the server.'
+
+  /call-sessions/{id}/end:
+    post:
+      tags: [call-sessions]
+      summary: Hang up an in-progress call.
+      description: |
+        Triggered by the "End call" button in the live-call UI. The handler
+        verifies the `CallSession` is owned by the user and currently in
+        a terminable state (`DIALING` or `IN_PROGRESS`), then proxies to
+        the bot's `POST /calls/{call_sid}/end` over `BOT_INTERNAL_URL`.
+
+        The bot in turn asks Twilio to mark the call `completed` and
+        fails the workflow's `await-call` activity directly (see
+        `pipecat-bot.openapi.yaml`).
+
+        **Auth:** session cookie via `proxy.ts` (`x-user-id` header).
+      operationId: endCallSession
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CallSessionIdPath'
+      responses:
+        '200':
+          description: Hangup acknowledged. Body `{ok: true}`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                additionalProperties: false
+                properties:
+                  ok: { type: boolean, const: true }
+        '401':
+          description: No authenticated session.
+        '404':
+          description: CallSession not found or not owned by the user.
+        '409':
+          description: |
+            Call cannot be terminated — either no Twilio call has been
+            placed yet (`twilio_call_sid` null) or the session is already
+            in a terminal state (`COMPLETED` / `FAILED` / `NO_ANSWER`).
+        '502':
+          description: Bot proxy returned a non-2xx; the bot's status / body is propagated.
+        '503':
+          description: '`BOT_INTERNAL_URL` not configured on the server.'
+
   /voice-preview:
     get:
       tags: [voice]
@@ -307,23 +390,27 @@ paths:
       summary: Twilio statusCallback — watchdog + live-state writer.
       description: |
         Triggered by Twilio on every call lifecycle event. The handler
-        does two distinct things:
+        branches on `(CallStatus, AnsweredBy)` to decide whether to write
+        state. Twilio's Answering Machine Detection (AMD) is enabled on
+        the outbound call (`machine_detection=Enable`), so `AnsweredBy`
+        accompanies the `completed` event — distinguishing voicemail
+        pickup (where Pipecat never engages) from a real human conversation
+        (where Pipecat is the authoritative completer).
 
-        1. **`CallStatus=in-progress`** (Twilio's "answered" event) — the
-           handler updates the matching `CallSession` row from
-           `DIALING`/`PENDING` to `IN_PROGRESS` and stamps `started_at`.
-           This is what flips the in-progress banner / "Live" pill in the
-           UI. Temporal is **not** notified; Pipecat is still the
-           authoritative completer for the happy path.
+        | `CallStatus` | `AnsweredBy` | Effect |
+        |---|---|---|
+        | `in-progress` | any | Flip `CallSession` `DIALING`/`PENDING` → `IN_PROGRESS` and stamp `started_at`. Temporal not notified. |
+        | `completed` | `machine_*` / `fax` | Voicemail pickup — `/twiml` returned `<Hangup/>`, no WSS. Complete `await-call` with `NO_ANSWER`. |
+        | `completed` | `human` / `unknown` / unset | **No-op.** The bot's WSS handler is the authoritative completion path. |
+        | `no-answer` / `failed` / `busy` / `canceled` | any | Complete `await-call` with `FAILED` or `NO_ANSWER` (per `STATUS_MAP`). |
+        | `queued` / `ringing` | any | No-op (observational only). |
 
-        2. **Abnormal statuses** (`no-answer`, `failed`, `busy`,
-           `canceled`) — the handler completes the corresponding Temporal
-           `await-call` activity externally with a
-           `CallOutcome(status=FAILED|NO_ANSWER)` payload.
-
-        Normal `completed` status is **NOT** forwarded to Temporal — Pipecat
-        is the authoritative completer on the happy path. See
-        `docs/architecture/temporal-workflow.md` §5.
+        Why the human-pickup no-op matters: the bot's WSS handler builds a
+        full outcome (transcript + recording) via Twilio API round-trips
+        before completing the activity. The webhook fires `completed` the
+        instant Twilio's leg ends — racing the bot. If the webhook fired
+        unconditionally, it would stomp the bot's outcome and route the
+        workflow through `handle_missed_call`, dropping the journal entry.
 
         The handler must return 200 fast (< 15 s) to keep Twilio from
         retrying; all work happens synchronously but is kept minimal
@@ -332,9 +419,9 @@ paths:
         **Public.** Authenticated via `X-Twilio-Signature`.
 
         **Note on body casing:** Twilio sends form-encoded PascalCase field
-        names (`CallSid`, `CallStatus`). This is Twilio's contract; we can't
-        change it. All *other* request/response bodies in this API are
-        snake_case per the convention above.
+        names (`CallSid`, `CallStatus`, `AnsweredBy`). This is Twilio's
+        contract; we can't change it. All *other* request/response bodies
+        in this API are snake_case per the convention above.
       operationId: twilioCallStatus
       security:
         - twilioSignature: []
@@ -373,6 +460,15 @@ components:
       in: path
       required: true
       description: JournalEntry cuid v1 ID.
+      schema:
+        type: string
+        minLength: 20
+        maxLength: 40
+    CallSessionIdPath:
+      name: id
+      in: path
+      required: true
+      description: CallSession cuid v1 ID.
       schema:
         type: string
         minLength: 20
@@ -498,14 +594,19 @@ components:
           enum:
             [queued, ringing, in-progress, completed, busy, no-answer, failed, canceled]
           description: |
-            Triggers DB writes on:
-              - `in-progress` — flips `CallSession.status` to `IN_PROGRESS`
-                and stamps `started_at`.
-              - `no-answer` / `failed` / `busy` / `canceled` — completes
-                the Temporal `await-call` activity with a
-                `CallOutcome(FAILED|NO_ANSWER)`.
-            All others (`queued`, `ringing`, `completed`) are observational —
-            the handler 204s without touching state.
+            Branching is on `(CallStatus, AnsweredBy)`; see operation
+            description for the full table.
+        AnsweredBy:
+          type: string
+          enum:
+            [human, machine_start, machine_end_beep, machine_end_silence, machine_end_other, fax, unknown]
+          description: |
+            Twilio AMD result. Sent on `completed` (and sometimes earlier)
+            because the outbound call was created with
+            `machine_detection=Enable`. The handler treats `machine_*` /
+            `fax` as voicemail pickup (complete the activity as
+            `NO_ANSWER`); `human` / `unknown` / unset means a real
+            conversation happened — leave completion to the bot's WSS.
         CallDuration:
           type: string
           description: Integer seconds as a string (Twilio form-encodes everything).
@@ -515,6 +616,28 @@ components:
           type: string
         To:
           type: string
+
+    LiveTranscript:
+      type: object
+      required: [segments]
+      additionalProperties: false
+      description: |
+        In-memory chronological transcript for an active call. Empty
+        `segments` is a valid response (call still PENDING, or pipeline
+        already torn down).
+      properties:
+        segments:
+          type: array
+          items:
+            type: object
+            required: [speaker, text]
+            additionalProperties: false
+            properties:
+              speaker:
+                type: string
+                description: '`assistant` for bot turns, `user` for caller turns.'
+              text:
+                type: string
 
     ProblemDetails:
       description: |
