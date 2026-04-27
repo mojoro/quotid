@@ -5,25 +5,15 @@ import { currentUserId } from "@/lib/auth";
 import { StatusCard } from "@/components/journal/status-card.client";
 import { fmtDuration, fmtMonth, fmtTimeOfDay } from "@/lib/format";
 
-type FeedItem =
-  | {
-      kind: "entry";
-      id: string;
-      entryDate: string;
-      ts: number;
-      timeOfDay: string;
-      title: string;
-      isEdited: boolean;
-      durationSeconds: number | null;
-    }
-  | {
-      kind: "missed";
-      id: string;
-      entryDate: string;
-      ts: number;
-      timeOfDay: string;
-      failureReason: string | null;
-    };
+type FeedItem = {
+  id: string;
+  entryDate: string;
+  ts: number;
+  timeOfDay: string;
+  title: string;
+  isEdited: boolean;
+  durationSeconds: number | null;
+};
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -39,7 +29,7 @@ function greeting() {
 export default async function JournalPage() {
   const userId = await currentUserId();
 
-  const [user, schedule, entries, missed] = await Promise.all([
+  const [user, schedule, entries] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
       select: { email: true, phoneNumber: true, timezone: true },
@@ -54,23 +44,12 @@ export default async function JournalPage() {
       take: 100,
       include: { callSession: { select: { durationSeconds: true } } },
     }),
-    prisma.callSession.findMany({
-      where: {
-        userId,
-        status: { in: ["NO_ANSWER", "FAILED"] },
-        journalEntry: { is: null },
-      },
-      orderBy: { scheduledFor: "desc" },
-      take: 50,
-      select: { id: true, scheduledFor: true, failureReason: true },
-    }),
   ]);
 
   if (!user) return null;
 
-  const feed: FeedItem[] = [
-    ...entries.map<FeedItem>((e) => ({
-      kind: "entry" as const,
+  const feed: FeedItem[] = entries
+    .map<FeedItem>((e) => ({
       id: e.id,
       entryDate: isoDate(e.entryDate),
       ts: e.createdAt.getTime(),
@@ -78,16 +57,8 @@ export default async function JournalPage() {
       title: e.title,
       isEdited: e.isEdited,
       durationSeconds: e.callSession?.durationSeconds ?? null,
-    })),
-    ...missed.map<FeedItem>((m) => ({
-      kind: "missed" as const,
-      id: m.id,
-      entryDate: isoDate(m.scheduledFor),
-      ts: m.scheduledFor.getTime(),
-      timeOfDay: fmtTimeOfDay(m.scheduledFor),
-      failureReason: m.failureReason,
-    })),
-  ].sort((a, b) => b.ts - a.ts);
+    }))
+    .sort((a, b) => b.ts - a.ts);
 
   const groups = new Map<string, FeedItem[]>();
   for (const item of feed) {
@@ -143,15 +114,8 @@ export default async function JournalPage() {
                 const isCont = prev?.entryDate === item.entryDate;
                 const hasCont = next?.entryDate === item.entryDate;
 
-                return item.kind === "entry" ? (
+                return (
                   <EntryRow
-                    key={item.id}
-                    item={item}
-                    isCont={isCont}
-                    hasCont={hasCont}
-                  />
-                ) : (
-                  <MissedRow
                     key={item.id}
                     item={item}
                     isCont={isCont}
@@ -216,7 +180,7 @@ function EntryRow({
   isCont,
   hasCont,
 }: {
-  item: Extract<FeedItem, { kind: "entry" }>;
+  item: FeedItem;
   isCont: boolean;
   hasCont: boolean;
 }) {
@@ -258,41 +222,3 @@ function EntryRow({
   );
 }
 
-function MissedRow({
-  item,
-  isCont,
-  hasCont,
-}: {
-  item: Extract<FeedItem, { kind: "missed" }>;
-  isCont: boolean;
-  hasCont: boolean;
-}) {
-  return (
-    <div
-      className={`grid w-full grid-cols-[48px_1fr_auto] items-baseline gap-3 px-0.5 py-3.5 md:grid-cols-[56px_1fr_auto] md:gap-4.5 md:px-1 md:py-4.5 ${
-        hasCont ? "border-b border-transparent" : "border-b border-paper-3"
-      }`}
-    >
-      <DayCell
-        isCont={isCont}
-        hasCont={hasCont}
-        date={item.entryDate}
-        timeOfDay={item.timeOfDay}
-      />
-      <div>
-        <div className="font-display text-[16px] leading-[1.3] tracking-[-0.01em] text-ink-3 italic md:text-[19px]">
-          We tried, but couldn&apos;t reach you.
-        </div>
-        <div className="mt-1 flex items-center gap-2 text-[13px] text-ink-3">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-transparent bg-cool-soft px-2 py-0.5 text-[11px] tracking-[0.04em] text-cool">
-            Missed · {item.timeOfDay}
-          </span>
-          {item.failureReason && (
-            <span className="text-xs text-ink-4">{item.failureReason}</span>
-          )}
-        </div>
-      </div>
-      <div />
-    </div>
-  );
-}
