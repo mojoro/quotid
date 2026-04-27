@@ -30,8 +30,8 @@ All four actions return `ServerActionResult<T>`. They **never throw** for antici
 
 ### `updateCallSchedule`
 
-**File:** `app/actions/call-schedule.ts`
-**Caller:** Settings page (`/settings`), form with time picker + enabled toggle.
+**File:** `app/(app)/settings/actions.ts`
+**Caller:** Settings page (`/settings`), form with time picker, day-of-week chips, and enabled toggle.
 
 ```ts
 'use server';
@@ -39,29 +39,130 @@ All four actions return `ServerActionResult<T>`. They **never throw** for antici
 export type UpdateCallScheduleInput = {
   localTimeOfDay: string; // "HH:MM", 24h, in user's timezone
   enabled: boolean;
+  daysOfWeek: number;    // 0..127 bitmask, bit 0 = Sunday … bit 6 = Saturday
 };
+
+export type UpdateCallScheduleResult =
+  | {
+      ok: true;
+      schedule: {
+        id: string;
+        localTimeOfDay: string;
+        enabled: boolean;
+        daysOfWeek: number;
+        temporalScheduleId: string;
+      };
+    }
+  | { ok: false; error: string };
 
 export async function updateCallSchedule(
   input: UpdateCallScheduleInput
-): Promise<ServerActionResult<CallSchedule>>;
+): Promise<UpdateCallScheduleResult>;
 ```
 
 **Side effects:**
 1. Validates `localTimeOfDay` matches `^([01]\d|2[0-3]):[0-5]\d$`.
-2. UPSERTs `call_schedules` row for the authenticated user.
-3. Creates-or-updates the corresponding Temporal Schedule (ID: `journal:{userId}`) via the Temporal TypeScript client. See `docs/architecture/temporal-workflow.md` §4.
-4. If `enabled=false`, pauses the Temporal Schedule (`ScheduleState.paused`).
-5. Calls `revalidateTag('call-schedules')` so TanStack Query re-fetches.
+2. Validates `daysOfWeek` is an integer in `[0, 127]` (7-bit mask).
+3. UPSERTs `call_schedules` row for the authenticated user.
+4. Creates-or-updates the corresponding Temporal Schedule (ID: `journal:{userId}`) via the Temporal TypeScript client. See `docs/architecture/temporal-workflow.md` §4.
+5. Translates `daysOfWeek` into the schedule's calendar spec:
+   - All 7 bits set (`0b1111111` = 127) → no `dayOfWeek` filter, fires every day.
+   - Subset → `calendars[0].dayOfWeek` is set to the corresponding `["SUNDAY"..."SATURDAY"]` array (Temporal calendar day-name enum).
+   - 0 bits set (`0`) → schedule is paused regardless of `enabled` (no day means no fire; pausing avoids drift).
+6. Pauses / unpauses via `handle.pause()` / `handle.unpause()`. The schedule is "effectively paused" when `enabled=false` OR `daysOfWeek=0`.
+7. Calls `revalidatePath('/settings')` so the server-rendered page picks up the new state.
 
 **Atomicity:** DB write and Temporal Schedule mutation are NOT in a distributed transaction. Order is: DB first, Temporal second. If Temporal fails after DB succeeds, the action returns `{ ok: false, error }` and a backfill cron (out of MVP scope) would reconcile. For MVP, the happy path is reliable enough; a failed sync shows a user-visible error and asks them to retry.
 
-**Errors:**
+**Errors (returned as `{ ok: false, error: string }`):**
 
-| `type` | When |
+| `error` substring | When |
 |---|---|
-| `validation/invalid-time-of-day` | `localTimeOfDay` doesn't match the HH:MM pattern. |
-| `auth/unauthenticated` | No session cookie. |
-| `temporal/sync-failed` | DB wrote, Temporal failed. State is drifted; user should retry. |
+| `localTimeOfDay must be HH:MM (24h)` | Time format invalid. |
+| `daysOfWeek must be a 7-bit bitmask (0-127)` | Out-of-range or non-integer mask. |
+| `user not found` | Authenticated `userId` has no `User` row (defensive). |
+| `temporal sync failed: …` | DB wrote, Temporal failed. State is drifted; user should retry. |
+
+---
+
+### `updateProfile`
+
+**File:** `app/(app)/settings/actions.ts`
+**Caller:** Settings page profile form (name + phone + timezone).
+
+```ts
+'use server';
+
+export type UpdateProfileInput = {
+  name: string | null;
+  phoneNumber: string;  // E.164
+  timezone: string;     // IANA tz database name, e.g. "Europe/Berlin"
+};
+
+export type UpdateProfileResult =
+  | { ok: true; profile: { name: string | null; phoneNumber: string; timezone: string } }
+  | { ok: false; error: string };
+
+export async function updateProfile(
+  input: UpdateProfileInput
+): Promise<UpdateProfileResult>;
+```
+
+**Validation:**
+- `name` is trimmed; empty string becomes `null`. Max length 80 chars.
+- `phoneNumber` must match `^\+[1-9]\d{6,14}$` (E.164).
+- `timezone` is probed via `new Intl.DateTimeFormat("en-US", { timeZone: tz })`; anything that throws is rejected as invalid.
+
+**Side effects:**
+1. Updates the authenticated user's `User` row (`name`, `phoneNumber`, `timezone`).
+2. **Re-syncs the existing Temporal schedule** if one exists. Temporal stores `timezone` on the schedule spec, so changing `user.timezone` would otherwise drift the schedule into the old zone. The action loads the current `CallSchedule` row and re-invokes `updateCallSchedule(...)` with the existing time / enabled / daysOfWeek values to push the new timezone into Temporal.
+3. Calls `revalidatePath('/settings')`.
+
+**Errors (returned as `{ ok: false, error: string }`):**
+
+| `error` substring | When |
+|---|---|
+| `name must be ≤80 chars` | Trimmed name exceeds the limit. |
+| `phone must be E.164 …` | Phone fails the E.164 regex. |
+| `invalid IANA timezone` | `Intl.DateTimeFormat` rejects the timezone. |
+| `phone number already in use` | Prisma unique-constraint violation (multi-user prep; defensive in MVP). |
+| `update failed: …` | Any other Prisma error, surface as-is. |
+| `temporal sync failed: …` | The downstream `updateCallSchedule` re-sync failed; surfaced verbatim. |
+
+---
+
+### `updateVoicePreference`
+
+**File:** `app/(app)/settings/actions.ts`
+**Caller:** Settings page voice picker; called after the user auditions and selects an Aura 2 voice.
+
+```ts
+'use server';
+
+export type UpdateVoiceResult =
+  | { ok: true; voice: VoiceId }
+  | { ok: false; error: string };
+
+export async function updateVoicePreference(
+  voice: string
+): Promise<UpdateVoiceResult>;
+```
+
+**Validation:** `voice` must match an `id` in `AVAILABLE_VOICES`.
+
+**Important — neutral module split:** `AVAILABLE_VOICES` and the `VoiceId` type live in `app/(app)/settings/voices.ts`, not in `actions.ts`. A `"use server"` file may export only async functions, so the const + type must sit in a sibling neutral module. Both the action and the client-side voice picker import from `./voices`.
+
+**Side effects:**
+1. Updates `User.voicePreference` for the authenticated user.
+2. Calls `revalidatePath('/settings')`.
+
+The bot reads `User.voicePreference` at call-trigger time (via the worker) and passes it as `voice` on `POST /calls` — see `pipecat-bot.openapi.yaml` `CreateCallRequest.voice`.
+
+**Errors (returned as `{ ok: false, error: string }`):**
+
+| `error` substring | When |
+|---|---|
+| `unknown voice` | `voice` is not in the allowlist. |
 
 ---
 
