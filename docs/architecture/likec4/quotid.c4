@@ -36,17 +36,17 @@ model {
 
     web = webapp 'Web App' {
       technology 'Next.js 16, TanStack Query'
-      description 'UI, Server Actions, Route Handlers (incl. Twilio status webhook)'
+      description 'UI, Server Actions, Route Handlers. Settings page edits user profile (name, phone, timezone, voicePreference) and call schedule (time, daysOfWeek bitmask). Twilio status webhook flips CallSession to IN_PROGRESS on answer and to NO_ANSWER/FAILED on abnormal events. Proxies voice previews via /api/voice-preview.'
     }
 
     pipecat = container 'Pipecat Bot Server' {
       technology 'Python, FastAPI'
-      description 'Telephony bridge. REST: /calls, /calls/{sid}/twiml. WSS: /calls/{sid}/stream. Runs the STT→LLM→TTS pipeline per call.'
+      description 'Telephony bridge. REST: /calls, /calls/{sid}/twiml. WSS: /calls/{sid}/stream. Runs the STT→LLM→TTS pipeline per call. Two frame processors (UserTranscriptCapture after STT, AssistantTextCapture after LLM) feed a shared TranscriptCollector that becomes the call outcome.'
     }
 
     worker = container 'Temporal Worker' {
       technology 'Python'
-      description 'Activities: initiate_call, await_call, summarize, store_entry'
+      description 'Activities: create_call_session (reads user phone/timezone/voicePreference/name), initiate_call, await_call, summarize, store_entry'
     }
 
     temporal = container 'Temporal Server' {
@@ -71,7 +71,7 @@ model {
     description 'LLM routing. Claude Haiku in-call, Sonnet post-call.'
   }
   deepgramTts = system 'Deepgram TTS' {
-    description 'Real-time TTS (Aura). Same API key as STT; different service endpoint.'
+    description 'TTS (Aura). Same API key as STT; different service endpoint. Used by the bot for streaming in-call synthesis (WSS) and by the web app for short voice-preview clips on the settings page (HTTPS POST /v1/speak).'
   }
   neon = database 'Neon Postgres' {
     description 'Managed Postgres — journal data'
@@ -90,14 +90,15 @@ model {
   quotid.caddy -> quotid.pipecat 'Forwards /calls/{sid}/twiml, /calls/{sid}/stream' { technology 'HTTP / WSS' }
 
   quotid.web -[grpc]-> quotid.temporal 'Triggers workflows, queries state'
-  quotid.web -[pg]-> neon 'CRUD via Prisma'
+  quotid.web -[pg]-> neon 'CRUD via Prisma (user profile, call schedule incl. daysOfWeek bitmask, journal entries)'
+  quotid.web -[https]-> deepgramTts 'Voice preview clips (POST /v1/speak)'
 
   quotid.temporal -[grpc]-> quotid.worker 'Dispatches activity tasks'
   quotid.temporal -> quotid.tempvol 'Persists workflow history' { technology 'SQLite' }
 
-  quotid.worker -[https]-> quotid.pipecat 'POST /calls to initiate outbound call'
+  quotid.worker -[https]-> quotid.pipecat 'POST /calls to initiate outbound call (forwards user voicePreference + name)'
   quotid.worker -[https]-> openrouter 'Summarize transcript (Sonnet)'
-  quotid.worker -[pg]-> neon 'Write journal entry via Prisma'
+  quotid.worker -[pg]-> neon 'Read user profile (phone, timezone, voicePreference, name); write CallSession + journal entry via Prisma'
 
   quotid.pipecat -> twilio 'calls.create + Media Streams' { technology 'REST + WSS' }
   quotid.pipecat -[wss]-> deepgram 'Stream audio for STT'
@@ -177,7 +178,8 @@ views {
     description 'One call, schedule-fire → journal-write.'
 
     quotid.temporal -> quotid.worker 'Schedule fires; starts JournalingWorkflow'
-    quotid.worker -> quotid.pipecat 'activity: initiate_call(wf_id, activity_id, phone)' { technology 'HTTPS POST /calls' }
+    quotid.worker -> neon 'activity: create_call_session — read phone, timezone, voicePreference, name' { technology 'Postgres' }
+    quotid.worker -> quotid.pipecat 'activity: initiate_call(wf_id, activity_id, phone, voice, user_name)' { technology 'HTTPS POST /calls' }
     quotid.pipecat -> twilio 'calls.create(to=phone, twiml_url=/twiml)' { technology 'REST' }
     twilio -> user 'Ring' { technology 'PSTN' }
     twilio -> quotid.pipecat 'GET /calls/{sid}/twiml returns <Connect><Stream>' { technology 'HTTPS' }
@@ -202,7 +204,9 @@ views {
     variant sequence
 
     quotid.temporal -> quotid.worker 'schedule fires: start JournalingWorkflow'
-    quotid.worker -> quotid.pipecat 'POST /calls { wf_id, activity_id, phone }'
+    quotid.worker -> neon 'SELECT user (phone, timezone, voicePreference, name)'
+    quotid.worker <- neon 'user row'
+    quotid.worker -> quotid.pipecat 'POST /calls { wf_id, activity_id, phone, voice, user_name }'
     quotid.worker <- quotid.pipecat '201 Created { call_sid }'
 
     quotid.pipecat -> twilio 'REST: calls.create(to, twiml_url)'
@@ -215,6 +219,10 @@ views {
     twilio <- quotid.pipecat '<Connect><Stream url=wss://.../calls/{sid}/stream>'
 
     twilio -> quotid.pipecat 'WSS open /calls/{sid}/stream'
+
+    // Twilio "answered" status callback — flips CallSession DIALING → IN_PROGRESS
+    twilio -> quotid.web 'POST /api/webhooks/twilio/call-status (CallStatus=in-progress)'
+    quotid.web -> neon 'UPDATE call_sessions SET status=IN_PROGRESS, started_at=now()'
 
     // Per turn (abstracted — repeats ~30x during a 10-min call)
     quotid.pipecat -> deepgram 'stream audio chunks'

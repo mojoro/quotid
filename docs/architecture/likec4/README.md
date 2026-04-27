@@ -6,7 +6,7 @@ Architecture-as-code using [LikeC4](https://likec4.dev). One `.c4` source, four 
 |---|---|---|
 | `index` | C1 — Context | System boundary + external SaaS |
 | `containers` | C2 — Container | Internals of Quotid |
-| `production` | Supplementary — Deployment | Physical topology on Oracle Cloud VM |
+| `production` | Supplementary — Deployment | Physical topology on AWS Lightsail VM |
 | `callFlow` | Supplementary — Dynamic (graph) | End-to-end trace of a nightly journaling call |
 | `callSequence` | Supplementary — Dynamic (sequence) | Same flow as a UML sequence diagram, with responses |
 
