@@ -166,7 +166,7 @@ function Center({
   segments: LiveSegment[];
 }) {
   return (
-    <div className="grid grid-rows-[auto_1fr] items-start gap-6 overflow-hidden px-6 py-4">
+    <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-6 overflow-hidden px-6 py-4">
       <div className="flex flex-col items-center text-center">
         <Orb phase={phase} />
         <h1
@@ -213,7 +213,7 @@ function LiveTranscriptPane({ segments }: { segments: LiveSegment[] }) {
   return (
     <div
       ref={scrollRef}
-      className="mx-auto w-full max-w-[640px] overflow-y-auto rounded-[18px] border px-5 py-4"
+      className="mx-auto h-full min-h-0 w-full max-w-[640px] overflow-y-auto rounded-[18px] border px-5 py-4"
       style={{
         borderColor: "oklch(96% 0.005 80 / 0.12)",
         background: "oklch(96% 0.005 80 / 0.04)",
