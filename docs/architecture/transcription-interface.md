@@ -8,7 +8,7 @@
 - `docs/SESSION_HANDOFF.md` — decision #15 (CANONICAL as a second transcript row), decision #16 (Twilio-hosted recording URLs for MVP)
 - `prisma/schema.prisma` — `Transcript`, `TranscriptKind`, `TranscriptProvider`, unique `(call_session_id, kind)`
 - `docs/architecture/temporal-workflow.md` — §3 (activity catalogue), §7 (idempotency), §8 (timeouts)
-- `docs/architecture/pipecat-pipeline.md` — §9 (`TranscriptAccumulator` — MVP realtime transcript producer)
+- `docs/architecture/pipecat-pipeline.md` — §9 (`TranscriptCollector` + `UserTranscriptCapture` + `AssistantTextCapture` — MVP realtime transcript producer)
 - `docs/architecture/api/pipecat-bot.openapi.yaml` — WSS contract
 
 ---
@@ -19,7 +19,7 @@ The MVP populates exactly one transcript row per `CallSession`, written by `stor
 
 | Row | `kind` | `provider` | Source |
 |---|---|---|---|
-| 1 | `REALTIME` | `DEEPGRAM` | Deepgram Nova-3 streaming, captured by `TranscriptAccumulator` during the call |
+| 1 | `REALTIME` | `DEEPGRAM` | Deepgram Nova-3 streaming, captured by the bot's `UserTranscriptCapture` + `AssistantTextCapture` frame processors writing into a shared `TranscriptCollector` during the call. Segments are `{speaker, text}` only (no timing) — see `pipecat-pipeline.md` §9. |
 
 Step 6 adds a **second, optional row** produced after the call ends:
 
@@ -33,7 +33,8 @@ The realtime transcript is optimized for **latency**: Deepgram streams partial r
 
 - No access to future context when deciding a word boundary.
 - Limited punctuation and capitalization refinement.
-- No diarization (speaker separation is derived heuristically from frame direction).
+- No per-segment timing — only `{speaker, text}` per turn.
+- Speaker labels assigned from frame-flow position (`UserTranscriptCapture` after STT; `AssistantTextCapture` after LLM), not from acoustic diarization. Reliable for two-party calls but doesn't generalize.
 
 A **canonical** transcript reprocesses the recorded audio end-to-end with the whole clip available as context. On the same Deepgram account, the batch API applies:
 
@@ -62,11 +63,18 @@ from typing import Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class TranscriptSegment:
-    """Provider-agnostic segment shape. Matches the Json column shape
-    already used by the REALTIME path (see `pipecat-pipeline.md` §9's
-    `TranscriptSegment`) so both kinds of rows can be consumed by the
-    same downstream code — the summary prompt, the journal entry
-    detail view, a future export, etc."""
+    """Provider-agnostic segment shape.
+
+    The MVP REALTIME path (see `pipecat-pipeline.md` §9) writes only
+    `{speaker, text}` — segment-level timing was dropped because the
+    LLM side has no symmetric source for it. CANONICAL providers,
+    however, run on the full audio and naturally produce per-utterance
+    timestamps. We carry `start_ms` / `end_ms` / `confidence` here so
+    canonical-aware consumers (a future audio-aligned playback view)
+    can use them; the summary prompt and entry detail view ignore the
+    extra fields. When CANONICAL is read back as plain JSON, REALTIME
+    rows simply lack the timing keys — consumers must tolerate both
+    shapes."""
     speaker: str            # "user" | "assistant" | "unknown"
     text: str
     start_ms: int
@@ -186,8 +194,8 @@ def _convert_deepgram_response(response) -> CanonicalTranscript:
     """Extract utterances → TranscriptSegment list. Deepgram's
     diarize=true populates `speaker` as an int per utterance; map
     speaker 0 → "user" and all others → "assistant". For a two-party
-    call this is accurate; the bot is consistently one voice (Cartesia
-    Sonic) so Deepgram's clustering is stable.
+    call this is accurate; the bot is consistently one voice (Deepgram
+    Aura, e.g. `aura-2-thalia-en`) so clustering is stable.
 
     If diarization fails (one-speaker edge case), fall back to
     "unknown" for all segments rather than guessing — the REALTIME
@@ -382,7 +390,7 @@ Two reasons:
 
 2. **Source of truth.** `recording_url` is persisted by `store_entry` before `canonicalize_transcript` runs. Reading it back is "the DB is authoritative"; passing it through is "the workflow payload is authoritative." DB authority is simpler: if `store_entry` wrote it, canonical sees it; if not, canonical raises `ApplicationError` and stops.
 
-**Resolved (session 3 audit, 2026-04-25):** `CallOutcome` now carries `recording_url: str | None` (`temporal-workflow.md` §3.1). Pipecat's `TranscriptAccumulator.build_outcome` is now async and fetches the recording via `twilio.recordings.list_async(call_sid=..., limit=1)` at pipeline end (`pipecat-pipeline.md` §9). `store_entry` reads from `inp.outcome.recording_url`, persisting None when no recording landed (canonical transcription is silently skipped in that case via the §7 fallback policy).
+**Resolved (session 3 audit, 2026-04-25):** `CallOutcome` now carries `recording_url: str | None` (`temporal-workflow.md` §3.1). The bot's `TranscriptCollector.build_outcome` is async and fetches the recording via `twilio_client.recordings.list(call_sid=..., limit=1)` (wrapped in `asyncio.to_thread`) at pipeline end (`pipecat-pipeline.md` §9). `store_entry` reads from `inp.outcome.recording_url`, persisting None when no recording landed (canonical transcription is silently skipped in that case via the §7 fallback policy).
 
 ## 6. Database semantics
 
