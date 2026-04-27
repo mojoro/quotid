@@ -57,6 +57,8 @@ sg docker -c "bash scripts/deploy.sh"
 - **Voices stored as Deepgram model IDs.** `apps/web/app/(app)/settings/voices.ts` defines six Aura 2 voices (Thalia, Orion, Luna, Aries, Draco, Iris); IDs (`aura-2-*-en`) flow straight through to the bot's TTS.
 - **Don't export non-functions from `"use server"` files.** They become `undefined` on the client at runtime. Shared data (e.g. `AVAILABLE_VOICES`) lives in a neutral module imported by both server actions and client components.
 - **`/icon` and `/apple-icon` are in `proxy.ts` PUBLIC_PREFIXES** so Next's auto-generated icon routes aren't redirected to /login. Don't add new auth-exempt paths casually.
+- **STT chosen by factory, not at the wire site.** `apps/pipecat-bot/quotid_bot/stt_factory.py` is the only place that picks the STT vendor. It returns `(service, label)` where `label` is a `TranscriptProvider` enum value. The label flows through `TranscriptCollector` → `CallOutcome.transcript_provider` → `Transcript.provider` column. Adding a provider: install the Pipecat extra, add a `match` case, add the value to Prisma's `TranscriptProvider` enum, set `STT_PROVIDER` env. Worker code never hardcodes the provider name.
+- **Deepgram model: `nova-3-general`** (not Pipecat's `nova-2` default). Configured in `stt_factory.py`. ~50% lower WER than Nova-2 on noisy phone audio.
 
 ## Commit style — enforced by PreToolUse hook
 
