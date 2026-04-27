@@ -57,6 +57,7 @@ services:
     env_file: .env
     environment:
       TEMPORAL_ADDRESS: temporal:7233
+      BOT_INTERNAL_URL: http://bot:8000
     networks: [quotid]
     depends_on:
       temporal:
