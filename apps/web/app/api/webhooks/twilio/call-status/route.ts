@@ -44,16 +44,28 @@ export async function POST(req: NextRequest) {
     return new NextResponse(null, { status: 204 });
   }
 
-  // We treat "completed" as a backstop signal, not as the primary completion
-  // path. The bot's WSS handler is the source of truth — when it finalizes the
-  // pipeline normally, it completes the await_call activity with a full
-  // outcome. But sometimes the WSS never opens (voicemail picks up too fast,
-  // bot crashed before TwiML fetch, etc.) and "completed" is the ONLY signal
-  // that the call ended. In those cases we mark the activity as NO_ANSWER so
-  // the workflow proceeds to handle_missed_call instead of hanging until the
-  // 20-minute start-to-close timeout. Activity-already-complete races are
-  // swallowed below.
-  if (callStatus !== "completed" && !ABNORMAL.has(callStatus)) {
+  // The bot's WSS handler is the authoritative completion path for human
+  // pickups. It builds a full outcome (transcript + recording metadata)
+  // before calling complete_await_call, which takes ~5–10s of Twilio API
+  // round-trips. The webhook fires "completed" the instant Twilio's leg
+  // ends, BEFORE the bot finishes finalizing — so if the webhook
+  // unconditionally completes the activity, it stomps the bot's outcome and
+  // routes the workflow through handle_missed_call (no journal entry).
+  //
+  // Only fire from the webhook when we know the bot couldn't have engaged:
+  //  - "completed" with AMD AnsweredBy = machine_*/fax → voicemail pickup,
+  //    the /twiml endpoint returned <Hangup/>, no WSS ever opened.
+  //  - ABNORMAL events (no-answer/failed/busy/canceled) → the call never
+  //    progressed to TwiML.
+  //
+  // For "completed" with AnsweredBy = human / unknown / unset, do nothing
+  // and let the bot complete the activity with the real outcome.
+  const answeredBy = (params.get("AnsweredBy") ?? "").toLowerCase();
+  const isMachinePickup =
+    callStatus === "completed" &&
+    (answeredBy.startsWith("machine_") || answeredBy === "fax");
+
+  if (!isMachinePickup && !ABNORMAL.has(callStatus)) {
     return new NextResponse(null, { status: 204 });
   }
 
@@ -64,10 +76,12 @@ export async function POST(req: NextRequest) {
   if (!cs) return new NextResponse(null, { status: 204 });
 
   const client = await getTemporalClient();
-  const status =
-    callStatus === "completed"
-      ? "NO_ANSWER"
-      : STATUS_MAP[callStatus] ?? "FAILED";
+  const status = isMachinePickup
+    ? "NO_ANSWER"
+    : STATUS_MAP[callStatus] ?? "FAILED";
+  const reason = isMachinePickup
+    ? `twilio:answered_by_${answeredBy}`
+    : `twilio:${callStatus}`;
   try {
     await client.activity.complete(
       { workflowId: cs.temporalWorkflowId, activityId: "await-call" },
@@ -75,7 +89,7 @@ export async function POST(req: NextRequest) {
         status,
         call_session_id: cs.id,
         twilio_call_sid: callSid,
-        failure_reason: `twilio:${callStatus}`,
+        failure_reason: reason,
       }
     );
   } catch {
