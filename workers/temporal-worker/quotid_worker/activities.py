@@ -42,6 +42,7 @@ async def create_call_session(inp: CreateCallSessionInput) -> CreateCallSessionR
         call_session_id=cs.id,
         phone_number=user.phoneNumber,
         user_timezone=user.timezone,
+        voice=user.voicePreference,
     )
 
 
@@ -53,6 +54,7 @@ async def initiate_call(inp: InitiateCallInput) -> InitiateCallResult:
         "activity_id": inp.activity_id,
         "call_session_id": inp.call_session_id,
         "phone_number": inp.to_phone,
+        "voice": inp.voice,
     }
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{CONFIG.bot_internal_url}/calls", json=payload)

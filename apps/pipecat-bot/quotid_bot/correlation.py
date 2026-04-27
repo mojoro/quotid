@@ -15,6 +15,7 @@ class CallCorrelation:
     workflow_id: str
     activity_id: str
     call_session_id: str
+    voice: str | None = None
 
 
 _REGISTRY: dict[str, CallCorrelation] = {}

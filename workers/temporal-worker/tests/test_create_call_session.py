@@ -18,6 +18,7 @@ async def stub_create_call_session(inp: CreateCallSessionInput) -> CreateCallSes
         call_session_id="cs_test",
         phone_number="+15555550100",
         user_timezone="UTC",
+        voice="aura-2-thalia-en",
     )
 
 

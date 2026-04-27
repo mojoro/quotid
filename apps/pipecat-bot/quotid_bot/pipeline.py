@@ -29,10 +29,15 @@ class QuotidDeepgramTTSService(DeepgramTTSService):
     """Empty subclass — swap point for future ModalTTSService (decision #11)."""
 
 
+DEFAULT_VOICE = "aura-2-thalia-en"
+
+
 def build_pipeline(
     websocket,
     stream_sid: str,
     call_sid: str,
+    *,
+    voice: str | None = None,
 ) -> tuple[PipelineTask, TranscriptAccumulator, LLMContext]:
     serializer = TwilioFrameSerializer(
         stream_sid=stream_sid,
@@ -60,7 +65,7 @@ def build_pipeline(
 
     tts = QuotidDeepgramTTSService(
         api_key=CONFIG.deepgram_api_key,
-        voice="aura-2-thalia-en",  # Aura 2 default; change via env if needed
+        voice=voice or DEFAULT_VOICE,
     )
 
     context = LLMContext(messages=[{"role": "system", "content": SYSTEM_PROMPT}])

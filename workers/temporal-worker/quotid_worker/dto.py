@@ -23,6 +23,7 @@ class CreateCallSessionResult(BaseModel):
     call_session_id: str
     phone_number: str  # E.164
     user_timezone: str
+    voice: str  # Deepgram Aura voice id, e.g. "aura-2-thalia-en"
 
 
 class InitiateCallInput(BaseModel):
@@ -30,6 +31,7 @@ class InitiateCallInput(BaseModel):
     workflow_id: str
     activity_id: str  # deterministic: "await-call"
     to_phone: str
+    voice: str  # Deepgram Aura voice id passed through to the bot
 
 
 class InitiateCallResult(BaseModel):
