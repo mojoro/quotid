@@ -35,6 +35,7 @@ class CreateCallRequest(BaseModel):
     call_session_id: str
     phone_number: str  # E.164
     voice: str | None = None  # Deepgram Aura voice id; None falls back to bot default
+    user_name: str | None = None  # Used in greeting + system prompt
 
 
 class CreateCallResponse(BaseModel):
@@ -64,6 +65,7 @@ async def create_call(req: CreateCallRequest) -> CreateCallResponse:
             activity_id=req.activity_id,
             call_session_id=req.call_session_id,
             voice=req.voice,
+            user_name=req.user_name,
         ),
     )
     logger.info(f"Created Twilio call {call.sid} for workflow {req.workflow_id}")
@@ -147,7 +149,11 @@ async def stream(websocket: WebSocket, call_session_id: str) -> None:
         return
 
     task, accumulator, _context = build_pipeline(
-        websocket, stream_sid, call_sid, voice=corr.voice
+        websocket,
+        stream_sid,
+        call_sid,
+        voice=corr.voice,
+        user_name=corr.user_name,
     )
 
     runner = PipelineRunner(handle_sigint=False)

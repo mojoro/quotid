@@ -24,6 +24,7 @@ class CreateCallSessionResult(BaseModel):
     phone_number: str  # E.164
     user_timezone: str
     voice: str  # Deepgram Aura voice id, e.g. "aura-2-thalia-en"
+    user_name: str | None = None  # Display name for greeting + prompt
 
 
 class InitiateCallInput(BaseModel):
@@ -32,6 +33,7 @@ class InitiateCallInput(BaseModel):
     activity_id: str  # deterministic: "await-call"
     to_phone: str
     voice: str  # Deepgram Aura voice id passed through to the bot
+    user_name: str | None = None
 
 
 class InitiateCallResult(BaseModel):

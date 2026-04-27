@@ -73,6 +73,7 @@ class JournalingWorkflow:
                 activity_id="await-call",
                 to_phone=session.phone_number,
                 voice=session.voice,
+                user_name=session.user_name,
             ),
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=_INITIATE_CALL_RETRY,
