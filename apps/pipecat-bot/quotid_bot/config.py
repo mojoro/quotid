@@ -11,6 +11,17 @@ class Config:
     twilio_auth_token: str = os.environ.get("TWILIO_AUTH_TOKEN", "")
     twilio_phone_number: str = os.environ.get("TWILIO_PHONE_NUMBER", "")
     deepgram_api_key: str = os.environ.get("DEEPGRAM_API_KEY", "")
+    # STT/TTS chosen by env so swapping providers is a config change, not a
+    # code change. Both *_API_KEY values fall back to DEEPGRAM_API_KEY so prod
+    # env files don't have to migrate at the same time as the code.
+    stt_provider: str = os.environ.get("STT_PROVIDER", "deepgram")
+    stt_api_key: str = (
+        os.environ.get("STT_API_KEY") or os.environ.get("DEEPGRAM_API_KEY", "")
+    )
+    tts_provider: str = os.environ.get("TTS_PROVIDER", "deepgram")
+    tts_api_key: str = (
+        os.environ.get("TTS_API_KEY") or os.environ.get("DEEPGRAM_API_KEY", "")
+    )
     openrouter_api_key: str = os.environ.get("OPENROUTER_API_KEY", "")
     cartesia_api_key: str = os.environ.get("CARTESIA_API_KEY", "")
     cartesia_voice_id: str = os.environ.get("CARTESIA_VOICE_ID", "")
