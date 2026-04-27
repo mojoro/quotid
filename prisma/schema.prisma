@@ -23,13 +23,15 @@ datasource db {
 // data migration.
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  phoneNumber  String   @unique @map("phone_number") // E.164, e.g. "+14155551234"
-  timezone     String // IANA, e.g. "America/Chicago"
-  passcodeHash String   @map("passcode_hash") // argon2id; verified by POST /api/auth/login
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id              String   @id @default(cuid())
+  email           String   @unique
+  name            String?
+  phoneNumber     String   @unique @map("phone_number") // E.164, e.g. "+14155551234"
+  timezone        String // IANA, e.g. "America/Chicago"
+  voicePreference String   @default("aura-2-thalia-en") @map("voice_preference")
+  passcodeHash    String   @map("passcode_hash") // argon2id; verified by POST /api/auth/login
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
   callSchedule   CallSchedule?
   callSessions   CallSession[]
@@ -76,6 +78,8 @@ model CallSchedule {
   userId             String   @unique @map("user_id")
   localTimeOfDay     String   @map("local_time_of_day") // "21:00"
   enabled            Boolean  @default(true)
+  // 7-bit bitmask: bit 0 = Sunday … bit 6 = Saturday. Default 127 = every day.
+  daysOfWeek         Int      @default(127) @map("days_of_week")
   temporalScheduleId String?  @unique @map("temporal_schedule_id")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
