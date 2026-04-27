@@ -34,7 +34,7 @@ export default async function EntryDetailPage({
     }),
     prisma.user.findUnique({
       where: { id: userId },
-      select: { email: true, name: true },
+      select: { email: true, name: true, timezone: true },
     }),
   ]);
 
@@ -46,10 +46,11 @@ export default async function EntryDetailPage({
   const startedAt = entry.callSession?.startedAt ?? null;
   const userLabelDisplay = displayName(user.name, user.email);
 
+  const tz = user.timezone;
   const eyebrowParts = [
-    fmtLong(entry.entryDate),
+    fmtLong(entry.entryDate, tz),
     duration ? `${fmtDuration(duration)} call` : null,
-    startedAt ? fmtTimeOfDay(startedAt) : null,
+    startedAt ? fmtTimeOfDay(startedAt, tz) : null,
   ].filter(Boolean);
 
   return (

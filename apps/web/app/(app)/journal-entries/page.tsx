@@ -3,24 +3,31 @@ import { dehydrate, HydrationBoundary, QueryClient } from "@tanstack/react-query
 import { prisma } from "@/lib/db";
 import { currentUserId } from "@/lib/auth";
 import { StatusCard } from "@/components/journal/status-card.client";
-import { fmtDuration, fmtMonth, fmtTimeOfDay } from "@/lib/format";
+import {
+  fmtDuration,
+  fmtMonth,
+  fmtTimeOfDay,
+  fmtWeekday,
+  isoDateInTz,
+} from "@/lib/format";
 
 type FeedItem = {
   id: string;
   entryDate: string;
   ts: number;
   timeOfDay: string;
+  weekday: string;
+  dayOfMonth: string;
   title: string;
   isEdited: boolean;
   durationSeconds: number | null;
 };
 
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
-function greeting() {
-  const h = new Date().getHours();
+function greeting(tz: string) {
+  // Hour-of-day in the user's timezone, not the server's.
+  const h = Number(
+    new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: tz })
+  );
   if (h < 12) return "Good morning";
   if (h < 18) return "Good afternoon";
   return "Good evening";
@@ -48,12 +55,18 @@ export default async function JournalPage() {
 
   if (!user) return null;
 
+  const tz = user.timezone;
   const feed: FeedItem[] = entries
     .map<FeedItem>((e) => ({
       id: e.id,
-      entryDate: isoDate(e.entryDate),
+      entryDate: isoDateInTz(e.createdAt, tz),
       ts: e.createdAt.getTime(),
-      timeOfDay: fmtTimeOfDay(e.createdAt),
+      timeOfDay: fmtTimeOfDay(e.createdAt, tz),
+      weekday: fmtWeekday(e.createdAt, tz),
+      dayOfMonth: e.createdAt.toLocaleDateString("en-US", {
+        day: "numeric",
+        timeZone: tz,
+      }),
       title: e.title,
       isEdited: e.isEdited,
       durationSeconds: e.callSession?.durationSeconds ?? null,
@@ -62,7 +75,7 @@ export default async function JournalPage() {
 
   const groups = new Map<string, FeedItem[]>();
   for (const item of feed) {
-    const key = fmtMonth(item.entryDate);
+    const key = fmtMonth(item.entryDate, tz);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(item);
   }
@@ -80,7 +93,7 @@ export default async function JournalPage() {
   return (
     <div style={{ animation: "var(--animate-route-in)" }}>
       <div className="text-[11px] font-medium tracking-[0.16em] text-ink-3 uppercase">
-        {greeting()}, {greetingNameDisplay}
+        {greeting(tz)}, {greetingNameDisplay}
       </div>
       <h1 className="mt-2 font-display text-[clamp(32px,4.4vw,56px)] leading-[1.05] font-normal tracking-[-0.025em]">
         Your <em className="text-accent-ink">journal</em>, born from conversation.
@@ -136,12 +149,12 @@ export default async function JournalPage() {
 function DayCell({
   isCont,
   hasCont,
-  date,
+  dayOfMonth,
   timeOfDay,
 }: {
   isCont: boolean;
   hasCont: boolean;
-  date: string;
+  dayOfMonth: string;
   timeOfDay: string;
 }) {
   if (isCont) {
@@ -162,10 +175,9 @@ function DayCell({
     );
   }
 
-  const day = new Date(date).getDate();
   return (
     <div className="font-display text-[22px] tracking-[-0.02em] text-ink-2 [font-feature-settings:'lnum'] md:text-[28px]">
-      {day}
+      {dayOfMonth}
       {hasCont && (
         <div className="mt-1 font-mono text-[11px] tracking-[0.04em] text-ink-4">
           {timeOfDay || ""}
@@ -184,9 +196,6 @@ function EntryRow({
   isCont: boolean;
   hasCont: boolean;
 }) {
-  const weekday = new Date(item.entryDate).toLocaleString(undefined, {
-    weekday: "short",
-  });
   return (
     <Link
       href={`/journal-entries/${item.id}`}
@@ -197,7 +206,7 @@ function EntryRow({
       <DayCell
         isCont={isCont}
         hasCont={hasCont}
-        date={item.entryDate}
+        dayOfMonth={item.dayOfMonth}
         timeOfDay={item.timeOfDay}
       />
       <div>
@@ -216,7 +225,7 @@ function EntryRow({
         </div>
       </div>
       <div className="text-xs tabular-nums text-ink-4">
-        {isCont ? "" : weekday}
+        {isCont ? "" : item.weekday}
       </div>
     </Link>
   );
