@@ -27,7 +27,8 @@ Each inbound WebSocket connection on `WSS /calls/{call_sid}/stream` spins up **o
 | `pipecat.pipeline.runner` | `PipelineRunner` | Top-level driver for a `PipelineTask`. |
 | `pipecat.transports.websocket.fastapi` | `FastAPIWebsocketTransport`, `FastAPIWebsocketParams` | Twilio-side I/O. |
 | `pipecat.serializers.twilio` | `TwilioFrameSerializer` | Encodes/decodes Twilio Media Streams frames. |
-| `pipecat.services.deepgram.stt` | `DeepgramSTTService` | Streaming STT (Nova-3). |
+| `pipecat.services.stt_service` | `STTService` | Abstract STT base — returned by `stt_factory.make_stt()` (§7.5). |
+| `pipecat.services.deepgram.stt` | `DeepgramSTTService` | Streaming STT (Nova-3-general — see §7.5). |
 | `pipecat.services.openai.llm` | `OpenAILLMService` | LLM — pointed at OpenRouter via custom `base_url`. |
 | `pipecat.services.deepgram.tts` | `DeepgramTTSService` | Streaming TTS (Aura). |
 | `pipecat.audio.vad.silero` | `SileroVADAnalyzer` | Voice activity detection. |
@@ -73,13 +74,49 @@ Temporal worker                    Pipecat server                    Twilio
      │ (workflow resumes, summarize → store_entry)                      │
 ```
 
-Two distinct endpoints handle the call:
-1. **`POST /calls`** — creates the Twilio call, returns quickly with `call_sid`. No pipeline built yet.
-2. **`WSS /calls/{call_sid}/stream`** — Twilio initiates this after its `twiml_url` callback. This is where the pipeline lives.
+Four distinct endpoints handle the call lifecycle:
+1. **`POST /calls`** — creates the Twilio call, returns quickly with `call_sid`. No pipeline built yet. Now passes `machine_detection="Enable"` so Twilio surfaces an `AnsweredBy` form param to `/twiml` (§2.2).
+2. **`GET/POST /calls/{call_session_id}/twiml`** — branches on `AnsweredBy` (§2.2): `<Connect><Stream/></Connect>` for human/unknown, `<Hangup/>` for `machine_*`/`fax`.
+3. **`WSS /calls/{call_sid}/stream`** — Twilio initiates this after its `twiml_url` callback. This is where the pipeline lives.
+4. **Live-call surfaces** (§2.3) — `GET /calls/{sid}/transcript` and `POST /calls/{sid}/end`, used by the live-call dashboard. Internal-only (Caddy 403s public access).
 
-They share state via an in-process registry keyed by `call_sid`: `{call_sid -> {workflow_id, activity_id, call_session_id}}`. When the WSS handler accepts a connection, it looks up the correlation IDs it needs to complete the Temporal activity later. This is ephemeral memory — if the Bot Server restarts, in-flight calls are lost, the Temporal watchdog (`/api/webhooks/twilio/call-status`) handles that case.
+They share state via two parallel in-process registries (`quotid_bot/correlation.py`), both keyed by `call_sid`:
+- `_REGISTRY: dict[str, CallCorrelation]` — `{workflow_id, activity_id, call_session_id, voice, user_name}`. Set by `POST /calls`, read by the WSS handler to complete the Temporal activity, and by `POST /calls/{sid}/end` to short-circuit it on user hangup.
+- `_COLLECTORS: dict[str, TranscriptCollector]` — installed by the WSS handler at `register_collector()` time so `GET /calls/{sid}/transcript` can read the in-flight segment list.
 
-**Single-worker requirement:** this registry lives in one Python process's memory. The Bot Server MUST run with `uvicorn --workers=1` (or gunicorn equivalent). Multi-worker setups would route the `POST /calls` and the `WSS /calls/{sid}/stream` to different workers, each with an empty registry. If horizontal scaling becomes necessary, move the registry to Redis keyed by `call_sid` with a 1-hour TTL — but MVP concurrency cap is 4 calls, well within one worker's capacity.
+`remove(call_sid)` clears both. This is ephemeral memory — if the Bot Server restarts, in-flight calls are lost, the Temporal watchdog (`/api/webhooks/twilio/call-status`) handles that case.
+
+**Single-worker requirement:** these registries live in one Python process's memory. The Bot Server MUST run with `uvicorn --workers=1` (or gunicorn equivalent). Multi-worker setups would route the `POST /calls`, the WSS, and the live-transcript GET to different workers, each with an empty registry. If horizontal scaling becomes necessary, move the registries to Redis keyed by `call_sid` with a 1-hour TTL — but MVP concurrency cap is 4 calls, well within one worker's capacity.
+
+### 2.2 AMD branching (`/twiml`)
+
+`twilio.calls.create(...)` is invoked with `machine_detection="Enable"`. Twilio waits ~3 s after pickup, classifies the answerer, then includes an `AnsweredBy` form param when it requests TwiML. The `/twiml` handler forks on it:
+
+| `AnsweredBy` | TwiML returned | Effect |
+|---|---|---|
+| `human`, `unknown`, or unset | `<Response><Connect><Stream url=".../stream"/></Connect></Response>` | WSS opens; pipeline runs as normal. |
+| `machine_*` (e.g. `machine_end_beep`) or `fax` | `<Response><Hangup/></Response>` | Twilio hangs up. The subsequent `completed` status callback (with `AnsweredBy=machine_*`) is the signal the webhook uses to drive the workflow to `NO_ANSWER` — see `temporal-workflow.md` §5. |
+
+Cost: ~$0.0075/call for AMD. Net: prevents the bot from monologuing into voicemail and burning summary tokens on a non-conversation.
+
+### 2.3 Live-call endpoints
+
+Two read/write surfaces over the in-flight call. Both are internal-only — Caddy 403s public POSTs to `/calls`, and the live-transcript / end endpoints sit alongside it under the same prefix. The Next.js web app reaches them via `BOT_INTERNAL_URL`.
+
+**`GET /calls/{call_sid}/transcript`** → `{segments: [{speaker, text}, ...]}`
+
+Reads `_COLLECTORS[call_sid]` from the correlation module and returns whatever segments the `UserTranscriptCapture` / `AssistantTextCapture` frame processors have appended so far (§9). If no collector is registered (pipeline not yet started, or already finalized and removed), returns `{segments: []}` — caller falls back to the persisted REALTIME row in the DB. The dashboard polls this endpoint while the call is live.
+
+This surface is **transient and in-memory only** — distinct from the persisted `Transcript` row that `store_entry` writes after the call ends. It exposes the same `TranscriptCollector.segments` list but at frame-flow latency, not workflow completion latency.
+
+**`POST /calls/{call_sid}/end`** → `{ok: true}`
+
+User-initiated hang-up. Two-step compound action:
+
+1. `twilio.calls(call_sid).update(status="completed")` — tells Twilio to tear down the call leg. Twilio will then emit its `completed` status callback in the normal way.
+2. `fail_await_call(corr.workflow_id, "user_ended")` — directly drives the Temporal `await-call` activity to FAILED. Necessary because the WSS may never have opened (e.g. AMD-detected voicemail that the user manually ended before TwiML was even fetched), in which case nobody else would complete the activity and the workflow would block until its 20-minute backstop fires. If the WSS *did* open and is mid-pipeline, the Twilio close also triggers `on_client_disconnected` → `task.cancel()` → normal outcome flow; one of the two completions wins, the other is a swallowed already-completed.
+
+Twilio rejections surface via `TwilioRestException`; the handler forwards Twilio's HTTP status (4xx/5xx) to the caller via `HTTPException(status_code=…)` so the proxying Next.js layer can render meaningfully. `POST /calls` uses the same forwarding pattern so the worker's `initiate_call` activity can classify retryability — 4xx → non-retryable `TwilioClientError` ApplicationError, 5xx → retryable.
 
 ## 3. Pipeline graph
 
@@ -92,8 +129,9 @@ They share state via an in-process registry keyed by `call_sid`: `{call_sid -> {
                 │ AudioRawFrame
                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ DeepgramSTTService                                              │
-│   · streams audio over WSS to Deepgram                          │
+│ stt (STTService — currently DeepgramSTTService nova-3-general)  │
+│   · constructed by stt_factory.make_stt() (§7.5)                │
+│   · streams audio over WSS to the chosen provider               │
 │   · emits TranscriptionFrame (interim + final) per turn         │
 └───────────────┬─────────────────────────────────────────────────┘
                 │ TranscriptionFrame
@@ -171,7 +209,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair, LLMUserAggregatorParams,
 )
 from pipecat.serializers.twilio import TwilioFrameSerializer
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
@@ -181,6 +218,7 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from .config import CONFIG
+from .stt_factory import make_stt
 from .system_prompt import opening_line, system_prompt
 from .transcript_accumulator import (
     AssistantTextCapture, TranscriptCollector, UserTranscriptCapture,
@@ -225,7 +263,10 @@ def build_pipeline(
         ),
     )
 
-    stt = DeepgramSTTService(api_key=CONFIG.deepgram_api_key)
+    # STT chosen by env (§7.5). Returns (service, label) — the label is
+    # threaded into the collector so the persisted Transcript.provider
+    # column reflects whichever vendor actually transcribed the call.
+    stt, stt_provider_label = make_stt()
 
     llm = OpenAILLMService(
         api_key=CONFIG.openrouter_api_key,
@@ -234,7 +275,7 @@ def build_pipeline(
     )
 
     tts = QuotidDeepgramTTSService(            # see §7
-        api_key=CONFIG.deepgram_api_key,
+        api_key=CONFIG.tts_api_key,            # env-split from STT key (§7.5)
         voice=voice or DEFAULT_VOICE,          # per-call, with bot-side fallback
     )
 
@@ -243,7 +284,10 @@ def build_pipeline(
         messages=[{"role": "system", "content": system_prompt(user_name)}]
     )
     greeting = opening_line(user_name)
-    collector = TranscriptCollector(opening_line=greeting)  # seeds segment 0
+    collector = TranscriptCollector(
+        opening_line=greeting,                  # seeds segment 0
+        provider=stt_provider_label,            # carried into CallOutcome
+    )
     user_capture = UserTranscriptCapture(collector)
     asst_capture = AssistantTextCapture(collector)
 
@@ -395,6 +439,69 @@ The swap requires:
 2. Change one line in `bot.py`: `tts = ModalTTSService(...)`.
 3. Nothing else — no Pipeline changes, no aggregator changes, no transport changes.
 
+## 7.5 STT factory — single decision point
+
+Symmetric to the TTS subclass swap point (§7), STT selection is centralized in `quotid_bot/stt_factory.py`. The factory returns a `(STTService, label)` tuple; the pipeline assembly destructures it and threads the label into `TranscriptCollector` (§9) so the persisted `Transcript.provider` column reflects whichever provider actually ran.
+
+```python
+# apps/pipecat-bot/quotid_bot/stt_factory.py
+
+from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.stt_service import STTService
+
+from .config import CONFIG
+
+
+def make_stt() -> tuple[STTService, str]:
+    """Return (service, provider_label).
+
+    The label is a value of Prisma's TranscriptProvider enum
+    (DEEPGRAM | WHISPERX | OTHER). Adding a new label requires a
+    Prisma migration as well as a new branch here.
+    """
+    provider = CONFIG.stt_provider.lower()
+    match provider:
+        case "deepgram":
+            settings = DeepgramSTTService.Settings(
+                model="nova-3-general",
+                language="en-US",
+                smart_format=True,
+                punctuate=True,
+                interim_results=True,
+                endpointing=300,
+                utterance_end_ms=1000,
+            )
+            return (
+                DeepgramSTTService(api_key=CONFIG.stt_api_key, settings=settings),
+                "DEEPGRAM",
+            )
+        case _:
+            raise ValueError(f"unknown STT provider: {provider!r}")
+```
+
+**Why explicit endpointing settings rather than Pipecat defaults:** the streaming-side end-of-turn behavior interacts with `LocalSmartTurnAnalyzerV3` (§6). Pinning `endpointing=300` (Deepgram emits a final result 300 ms after the last word) and `utterance_end_ms=1000` (force a `UtteranceEnd` event after a 1-second silent gap even if endpointing didn't fire) makes the upgrade path to a different STT vendor reproducible — a future `case "assemblyai"` arm can map its own knobs to equivalents instead of inheriting a different vendor's defaults.
+
+**Why Nova-3-general specifically:** it's Deepgram's flagship streaming model — roughly half the WER of Nova-2 (the prior default) on noisy phone-line audio. Drop-in upgrade; no API surface change.
+
+**Env config (`quotid_bot/config.py`):**
+
+| Var | Default | Purpose |
+|---|---|---|
+| `STT_PROVIDER` | `"deepgram"` | Selects the `make_stt()` branch. Lowercased before matching. |
+| `STT_API_KEY` | falls back to `DEEPGRAM_API_KEY` | API key passed to whichever STT service is built. Fallback lets a single legacy `DEEPGRAM_API_KEY` keep working without env-file churn. |
+| `TTS_PROVIDER` | `"deepgram"` | Reserved for a future symmetric `make_tts()` factory. Currently unread; the pipeline directly constructs `QuotidDeepgramTTSService`. |
+| `TTS_API_KEY` | falls back to `DEEPGRAM_API_KEY` | API key consumed by the TTS service. Same fallback rationale. |
+
+The fallback is one-way: setting `STT_API_KEY` overrides `DEEPGRAM_API_KEY`, but unsetting `STT_API_KEY` re-exposes the legacy key. The split exists so a future provider swap (e.g. AssemblyAI) can ship without revoking Deepgram credentials.
+
+**Adding a new STT vendor** is a four-step change:
+1. Add the Pipecat extra in `pyproject.toml` (e.g. `pipecat-ai[assemblyai]`).
+2. Add a `case` branch here that builds the service and returns the matching label.
+3. Add the label to Prisma's `TranscriptProvider` enum (migration).
+4. Set `STT_PROVIDER=<provider>` in the bot's env.
+
+The pipeline graph and frame processors don't change — both the realtime collector and the persisted `Transcript.provider` column are vendor-agnostic by construction.
+
 ## 8. Interruption handling
 
 Pipecat's built-in mechanism; we enable it via `PipelineParams(allow_interruptions=True)`. Flow:
@@ -446,8 +553,18 @@ class TranscriptCollector:
     chronological — no post-hoc reassembly from LLM context.
     """
 
-    def __init__(self, *, opening_line: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        opening_line: str | None = None,
+        provider: str = "DEEPGRAM",
+    ) -> None:
         self.segments: list[Segment] = []
+        # Provider label is a value of Prisma's TranscriptProvider enum.
+        # Seeded by `make_stt()` (§7.5) so swapping STT vendors does not
+        # require touching this class — the label flows into the outcome
+        # dict and ultimately into Transcript.provider.
+        self._provider = provider
         if opening_line and opening_line.strip():
             # Seed with the bot's greeting. The greeting is queued as a
             # TextFrame to TTS but never goes through the LLM, so the
@@ -471,6 +588,11 @@ class TranscriptCollector:
 
         Returns a dict matching CallOutcome's wire shape — Pydantic on
         the worker side parses it back into a CallOutcome model.
+
+        Includes `transcript_provider=self._provider`, which the worker's
+        `store_entry` activity reads when writing the Transcript row's
+        `provider` column. The worker no longer hardcodes "DEEPGRAM";
+        the bot is the source of truth.
         """
         ...
 
@@ -527,7 +649,7 @@ class AssistantTextCapture(FrameProcessor):
 
 **Why capture both sides at frame-flow time instead of reading `LLMContext.messages` at pipeline end:** the prior design captured user transcripts via a single `TranscriptAccumulator` between STT and the user aggregator, then pulled assistant turns from the LLM context post-hoc. That doesn't preserve interleaving: STT finalizes user turns after a delay (`stop_secs` + SmartTurn), while assistant text is in the context the moment the LLM finishes streaming. The two timelines diverge enough that "user said X, then assistant said Y" gets reordered. Two FrameProcessors writing to one shared list, in their natural pipeline positions, encodes chronology by construction.
 
-**`build_outcome` also fetches Twilio metadata.** Beyond the segments, it calls `twilio_client.recordings.list(call_sid=...)` for the recording URL (consumed later by `canonicalize_transcript`, see `transcription-interface.md` §5.3) and `twilio_client.calls(sid).fetch()` for `start_time` / `end_time` / `duration`. Both are wrapped in `try/except` — Twilio outages cannot block the activity completion; the workflow tolerates `recording_url=None` and missing timestamps.
+**`build_outcome` also fetches Twilio metadata.** Beyond the segments, it calls `twilio_client.recordings.list(call_sid=..., limit=1)` for the recording URL (consumed later by `canonicalize_transcript`, see `transcription-interface.md` §5.3) and `twilio_client.calls(sid).fetch()` for `start_time` / `end_time` / `duration`. Both are wrapped in `try/except` — Twilio outages cannot block the activity completion; the workflow tolerates `recording_url=None` and missing timestamps. The returned dict carries `transcript_provider` (seeded from the constructor) alongside `transcript_text`, `transcript_segments`, `recording_url`, `started_at`, `ended_at`, and `duration_seconds`.
 
 ## 10. System prompt / conversation strategy
 
