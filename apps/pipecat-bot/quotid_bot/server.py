@@ -8,6 +8,7 @@ from fastapi.responses import PlainTextResponse
 from loguru import logger
 from pipecat.pipeline.runner import PipelineRunner
 from pydantic import BaseModel
+from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client as TwilioClient
 
 from .config import CONFIG
@@ -47,16 +48,28 @@ async def create_call(req: CreateCallRequest) -> CreateCallResponse:
     twiml_url = f"{CONFIG.bot_public_url}/calls/{req.call_session_id}/twiml"
     status_callback_url = f"{CONFIG.app_public_url}/api/webhooks/twilio/call-status"
 
-    call = await asyncio.to_thread(
-        twilio.calls.create,
-        to=req.to_phone,
-        from_=CONFIG.twilio_phone_number,
-        url=twiml_url,
-        status_callback=status_callback_url,
-        status_callback_event=["initiated", "ringing", "answered", "completed"],
-        record=True,
-        recording_channels="dual",
-    )
+    try:
+        call = await asyncio.to_thread(
+            twilio.calls.create,
+            to=req.to_phone,
+            from_=CONFIG.twilio_phone_number,
+            url=twiml_url,
+            status_callback=status_callback_url,
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
+            record=True,
+            recording_channels="dual",
+        )
+    except TwilioRestException as e:
+        # Forward Twilio's HTTP status so the worker classifies retryability
+        # correctly (4xx → non-retryable, 5xx → retry). Bare-throwing here would
+        # surface as a generic 500 and the worker would burn its retry budget on
+        # a permanent rejection (unverified number, suspended account, etc).
+        status_code = e.status if isinstance(e.status, int) and 400 <= e.status < 600 else 502
+        logger.warning(
+            f"Twilio rejected call to {req.to_phone}: "
+            f"status={e.status} code={e.code} msg={e.msg}"
+        )
+        raise HTTPException(status_code=status_code, detail=str(e.msg or e))
 
     register(
         call.sid,
