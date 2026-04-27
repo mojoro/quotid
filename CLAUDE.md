@@ -51,6 +51,12 @@ sg docker -c "bash scripts/deploy.sh"
 - **`/api/webhooks/` is in `proxy.ts` PUBLIC_PREFIXES.** Twilio status callbacks must not be redirected to /login.
 - **`uvicorn --workers=1` (single worker)** — bot has an in-process correlation registry (`call_sid → workflow_id`); multi-worker would split it.
 - **Caddy 403s public POST `/calls`** (decision #14). Worker hits the bot via `BOT_INTERNAL_URL=http://bot:8000` over the docker network.
+- **Per-user personalization chain.** `User.voicePreference` + `User.name` flow worker → bot via `CreateCallSessionResult.voice` / `.user_name` → `InitiateCallInput` → `CreateCallRequest` → `CallCorrelation` → `build_pipeline(voice=..., user_name=...)`. New per-user fields must follow this chain.
+- **Transcript built by two frame processors** sharing one `TranscriptCollector`: `UserTranscriptCapture` (after STT) and `AssistantTextCapture` (after LLM, before TTS). Segments are appended chronologically as they fire — do NOT reconstruct order from `LLMContext.messages` (STT finalizes faster than TTS, so context order is unreliable). Opening line is seeded at construction. See `apps/pipecat-bot/quotid_bot/transcript_accumulator.py`.
+- **System prompt forbids markdown.** TTS speaks asterisks/backticks literally. See `apps/pipecat-bot/quotid_bot/system_prompt.py`.
+- **Voices stored as Deepgram model IDs.** `apps/web/app/(app)/settings/voices.ts` defines six Aura 2 voices (Thalia, Orion, Luna, Aries, Draco, Iris); IDs (`aura-2-*-en`) flow straight through to the bot's TTS.
+- **Don't export non-functions from `"use server"` files.** They become `undefined` on the client at runtime. Shared data (e.g. `AVAILABLE_VOICES`) lives in a neutral module imported by both server actions and client components.
+- **`/icon` and `/apple-icon` are in `proxy.ts` PUBLIC_PREFIXES** so Next's auto-generated icon routes aren't redirected to /login. Don't add new auth-exempt paths casually.
 
 ## Commit style — enforced by PreToolUse hook
 
@@ -65,6 +71,7 @@ Subject-only. No body. No "feat:"/"fix:"/"docs:" prefix. No Co-Authored-By. No H
 | Workflow stuck `DIALING` | Bot crashed mid-call OR pipeline didn't terminate | Check `runner.run` exception path; verify `on_client_disconnected` registered |
 | No journal entry after call | `store_entry` retries (3) exhausted on a Prisma error | `MissingRequiredValueError` → use `connect: {id}` for relations; `datetime` not `date` for entryDate; `prisma.Json(...)` wrapper for JSON fields |
 | Bot won't reach worker | Wrong URL | Dev: `BOT_INTERNAL_URL=http://localhost:8000`. Prod: `http://bot:8000` (set in compose env override) |
+| Recording 502 in prod / works on localhost | Empty `Content-Length` header forwarded to Caddy | Only forward `Content-Length` when upstream provides it. See `apps/web/app/api/journal-entries/[id]/recording/route.ts` |
 
 ## Repo layout
 
@@ -91,11 +98,9 @@ quotid/
 
 Ordered by interview-impact:
 
-1. **Schedule toggle** (Slice 6 in original plan) — proves the autonomous nightly use case. Currently only "trigger call" works. Wire `Temporal Schedule.create({scheduleId: 'journal:{userId}', spec: {calendars: [{hour:21, minute:0}], timeZone: user.timezone}, ...})`.
-2. **Recording playback** — `CallSession.recordingUrl` is captured but never surfaced. Add `<audio src={...}>` on entry detail page.
-3. **Missed-call entries** — `handle_missed_call` activity sets `CallSession.status=NO_ANSWER/FAILED` but the UI only lists `JournalEntry`s. Show a "we tried but couldn't reach you" pill on the journal list.
-4. **Edit journal entry** — `body` + `generatedBody` separation exists in the schema for this; wire an edit form that sets `isEdited=true`.
-5. **In-progress banner** — when a CallSession is `DIALING` or `IN_PROGRESS`, show a "Call in progress…" banner on the journal page. Polls status via TanStack Query.
+1. **Missed-call entries** — `handle_missed_call` activity sets `CallSession.status=NO_ANSWER/FAILED` but the UI only lists `JournalEntry`s. Show a "we tried but couldn't reach you" pill on the journal list.
+2. **Edit journal entry** — `body` + `generatedBody` separation exists in the schema for this; wire an edit form that sets `isEdited=true`.
+3. **In-progress banner — finish wiring.** Status webhook flips `CallSession.status` to `IN_PROGRESS` on Twilio "answered" (`apps/web/app/api/webhooks/twilio/call-status/route.ts`), and `components/journal/status-card.client.tsx` renders the banner; verify polling cadence and DIALING-state coverage end-to-end.
 
 Deferred indefinitely:
 
